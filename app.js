@@ -639,17 +639,31 @@ function parseFtmoCsv(text) {
   if (rows.length < 2) return [];
   const headers = rows[0];
 
+  // FTMO's export has TWO columns both literally named "Price" (open price, then close
+  // price) — name-matching can't tell them apart, so resolve by position: first "Price"
+  // column is open price, the next one after it is close price.
+  const priceColumnIndices = headers
+    .map((h, i) => ({ h: h.toLowerCase().trim(), i }))
+    .filter(o => o.h === 'price')
+    .map(o => o.i);
+
+  let openPriceIdx = findColIndex(headers, 'price open', 'open price');
+  let closePriceIdx = findColIndex(headers, 'price close', 'close price');
+  if (openPriceIdx < 0 && priceColumnIndices.length >= 1) openPriceIdx = priceColumnIndices[0];
+  if (closePriceIdx < 0 && priceColumnIndices.length >= 2) closePriceIdx = priceColumnIndices[1];
+  if (openPriceIdx < 0) openPriceIdx = findColIndex(headers, 'price');
+
   const idx = {
     ticket: findColIndex(headers, 'ticket'),
     open: findColIndex(headers, 'open time', 'open'),
     type: findColIndex(headers, 'type'),
     volume: findColIndex(headers, 'volume', 'lots'),
     symbol: findColIndex(headers, 'symbol'),
-    openPrice: findColIndex(headers, 'price open', 'open price', 'price'),
+    openPrice: openPriceIdx,
     sl: findColIndex(headers, 'sl', 'stop loss'),
     tp: findColIndex(headers, 'tp', 'take profit'),
     close: findColIndex(headers, 'close time', 'close'),
-    closePrice: findColIndex(headers, 'price close', 'close price'),
+    closePrice: closePriceIdx,
     swap: findColIndex(headers, 'swap'),
     commission: findColIndex(headers, 'commission'),
     profit: findColIndex(headers, 'profit'),
@@ -704,25 +718,15 @@ async function importTradesFromCsv(file, statusEl) {
     return;
   }
 
-  statusEl.textContent = `Found ${parsed.length} trades in file — checking for duplicates...`;
-  const { data: existing } = await sb.from('trades').select('ticket');
-  const existingTickets = new Set((existing || []).map(t => t.ticket));
-  const newRows = parsed.filter(t => !existingTickets.has(t.ticket));
-
-  if (!newRows.length) {
-    statusEl.textContent = `All ${parsed.length} trades already imported — nothing new.`;
-    return;
-  }
-
-  statusEl.textContent = `Importing ${newRows.length} new trades...`;
-  const { error } = await sb.from('trades').insert(newRows);
+  statusEl.textContent = `Found ${parsed.length} trades — importing (existing trades get refreshed too)...`;
+  const { error } = await sb.from('trades').upsert(parsed, { onConflict: 'user_id,ticket' });
   if (error) {
     statusEl.textContent = `Import failed: ${error.message}`;
     return;
   }
 
   localStorage.setItem('trading_last_upload', new Date().toISOString());
-  statusEl.textContent = `Imported ${newRows.length} new trades (${parsed.length - newRows.length} already existed).`;
+  statusEl.textContent = `Imported/refreshed ${parsed.length} trades from file.`;
   renderTradingTab();
 }
 
@@ -753,20 +757,33 @@ function computeTradeStats(trades) {
   const losses = trades.filter(t => netResult(t) <= 0);
   const winRate = trades.length ? Math.round((wins.length / trades.length) * 100) : 0;
 
-  const rrValues = trades
-    .filter(t => Number(t.sl) > 0 && Number(t.tp) > 0 && Number(t.open_price) > 0)
+  // R-multiple: realized result measured against planned risk (entry-to-stop distance),
+  // not against the TP field. TP isn't a meaningful target for trades closed manually —
+  // R-multiple instead asks "how many multiples of my planned risk did I actually make
+  // or lose," which is the right metric for a discretionary/manual-close trading style.
+  const rMultiples = trades
+    .filter(t => Number(t.sl) > 0 && Number(t.open_price) > 0 && Number(t.close_price) > 0)
     .map(t => {
       const risk = Math.abs(Number(t.open_price) - Number(t.sl));
-      const reward = Math.abs(Number(t.tp) - Number(t.open_price));
-      return risk > 0 ? reward / risk : null;
+      if (risk <= 0) return null;
+      const move = t.trade_type === 'sell'
+        ? Number(t.open_price) - Number(t.close_price)
+        : Number(t.close_price) - Number(t.open_price);
+      return move / risk;
     })
-    // A closed trade's SL/TP fields can reflect a trailed stop (tiny risk) or a
-    // placeholder/no-real-target TP, producing meaningless ratios in the thousands.
-    // Cap at 20 — beyond that the figure isn't a real planned risk:reward setup.
-    .filter(v => v != null && isFinite(v) && v <= 20);
-  const avgRR = rrValues.length ? (rrValues.reduce((a, b) => a + b, 0) / rrValues.length) : null;
+    .filter(v => v != null && isFinite(v));
 
-  return { wins, losses, winRate, avgRR };
+  // Median, not mean — MT5 only exports the stop's position at close, not where it
+  // started. A trailed-tight stop on a big winner can produce an extreme R-multiple
+  // that isn't a data error, but it skews a mean heavily. Median reflects the typical
+  // trade far more honestly.
+  const sorted = [...rMultiples].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const medianRMultiple = sorted.length
+    ? (sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2)
+    : null;
+
+  return { wins, losses, winRate, medianRMultiple };
 }
 
 function maxStreak(trades, predicate) {
@@ -799,7 +816,7 @@ async function renderTradingTab() {
   const targetBalance = accountSize * (1 + Number(settings.profit_target_pct) / 100);
   const pnlPct = accountSize ? (totalPnl / accountSize) * 100 : 0;
 
-  const { wins, losses, winRate, avgRR } = computeTradeStats(trades);
+  const { wins, losses, winRate, medianRMultiple } = computeTradeStats(trades);
 
   // This week / weekly review (last completed week)
   const thisWeek = getMondaySundayRange(0);
@@ -945,7 +962,7 @@ async function renderTradingTab() {
     </div>
 
     <div class="stat-grid-3">
-      <div class="card stat-box"><div class="stat-box-value">${avgRR != null ? avgRR.toFixed(2) : '—'}</div><div class="stat-box-label">Avg R:R</div></div>
+      <div class="card stat-box"><div class="stat-box-value">${medianRMultiple != null ? (medianRMultiple >= 0 ? "+" : "") + medianRMultiple.toFixed(2) + "R" : "—"}</div><div class="stat-box-label">Median R-multiple</div></div>
       <div class="card stat-box"><div class="stat-box-value">${avgTradesPerWeek}</div><div class="stat-box-label">Avg trades / week</div></div>
       <div class="card stat-box"><div class="stat-box-value">${thisWeekTrades.length} / ${settings.max_trades_per_week}</div><div class="stat-box-label">This week</div></div>
     </div>
