@@ -87,7 +87,28 @@
     .login-form { display: flex; flex-direction: column; gap: 10px; }
     .login-error { color: var(--red); font-size: 12px; margin-top: 10px; }
 
-    /* ── EMPTY / LOADING ── */
+    /* ── TRADING TAB ── */
+    .stat-grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .stat-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .stat-box { background: var(--bg3); border: 0.5px solid var(--border2); border-radius: 8px; padding: 12px; text-align: center; }
+    .stat-box-value { font-size: 22px; font-weight: 500; }
+    .stat-box-label { font-size: 10px; color: var(--text4); text-transform: uppercase; letter-spacing: .06em; margin-top: 4px; }
+    .chart-wrap { position: relative; height: 220px; margin-top: 6px; }
+    .chart-wrap-sm { position: relative; height: 180px; margin-top: 6px; }
+    .upload-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .upload-status { font-size: 11px; color: var(--text4); }
+    .settings-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .settings-field label { font-size: 10px; color: var(--text4); display: block; margin-bottom: 4px; text-transform: uppercase; letter-spacing: .05em; }
+    .settings-field input { width: 100%; }
+    .progress-track { height: 8px; background: var(--bg3); border-radius: 4px; overflow: hidden; margin-top: 8px; }
+    .progress-fill { height: 100%; background: var(--purple); border-radius: 4px; transition: width .3s; }
+    .file-input-btn { display: inline-block; background: var(--purple); color: #EEEDFE; border-radius: 7px; padding: 7px 14px; font-size: 11px; font-weight: 500; cursor: pointer; }
+    .file-input-btn input { display: none; }
+    @media (max-width: 768px) {
+      .stat-grid-4 { grid-template-columns: repeat(2, 1fr); }
+      .stat-grid-3 { grid-template-columns: 1fr; }
+      .settings-grid { grid-template-columns: repeat(2, 1fr); }
+    }
     .empty-state { text-align: center; padding: 20px 10px; color: var(--text4); font-size: 12px; }
     .loading-text { color: var(--text4); font-size: 13px; text-align: center; padding: 16px; }
   </style>
@@ -120,6 +141,8 @@
 
 <!-- Supabase client library -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<!-- Chart.js for Trading tab charts -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <!-- Google Identity Services (for Calendar OAuth) -->
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 
