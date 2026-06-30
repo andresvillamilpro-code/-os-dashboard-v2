@@ -760,7 +760,10 @@ function computeTradeStats(trades) {
       const reward = Math.abs(Number(t.tp) - Number(t.open_price));
       return risk > 0 ? reward / risk : null;
     })
-    .filter(v => v != null && isFinite(v));
+    // A closed trade's SL/TP fields can reflect a trailed stop (tiny risk) or a
+    // placeholder/no-real-target TP, producing meaningless ratios in the thousands.
+    // Cap at 20 — beyond that the figure isn't a real planned risk:reward setup.
+    .filter(v => v != null && isFinite(v) && v <= 20);
   const avgRR = rrValues.length ? (rrValues.reduce((a, b) => a + b, 0) / rrValues.length) : null;
 
   return { wins, losses, winRate, avgRR };
