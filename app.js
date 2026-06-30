@@ -23,9 +23,9 @@ function escapeHtmlSafe(str) {
   return div.innerHTML;
 }
 
-let supabase;
+let sb;
 try {
-  supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 } catch (err) {
   document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('app').innerHTML = `<div class="card" style="margin:20px;"><p class="card-title" style="color:var(--red)">Could not load Supabase library</p><p class="empty-state">${escapeHtmlSafe(err.message)}</p></div>`;
@@ -62,19 +62,19 @@ const CONSISTENCY_ITEMS = [
 // ============================================
 
 async function getCurrentUser() {
-  const { data, error } = await supabase.auth.getUser();
+  const { data, error } = await sb.auth.getUser();
   if (error || !data?.user) return null;
   return data.user;
 }
 
 async function signIn(email, password) {
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
   if (error) throw error;
   return data.user;
 }
 
 async function signOut() {
-  await supabase.auth.signOut();
+  await sb.auth.signOut();
   showLoginScreen();
 }
 
@@ -221,13 +221,13 @@ async function renderDailyTab() {
 async function loadTradingSnapshot() {
   const monday = isoDate(getMondayOfWeek());
 
-  const { data: settingsRows } = await supabase.from('trading_settings').select('*').limit(1);
+  const { data: settingsRows } = await sb.from('trading_settings').select('*').limit(1);
   const settings = settingsRows?.[0] || {
     account_size: 100000, profit_target_pct: 10,
     max_drawdown_pct: 10, daily_loss_limit_pct: 5
   };
 
-  const { data: weekTrades } = await supabase
+  const { data: weekTrades } = await sb
     .from('trades')
     .select('profit, open_time')
     .gte('open_time', monday + 'T00:00:00Z');
@@ -236,7 +236,7 @@ async function loadTradingSnapshot() {
   const wins = trades.filter(t => Number(t.profit) > 0).length;
   const losses = trades.filter(t => Number(t.profit) <= 0).length;
 
-  const { data: allTrades } = await supabase.from('trades').select('profit');
+  const { data: allTrades } = await sb.from('trades').select('profit');
   const totalPnl = (allTrades || []).reduce((sum, t) => sum + Number(t.profit || 0), 0);
   const currentBalance = Number(settings.account_size) + totalPnl;
   const pnlPct = (totalPnl / Number(settings.account_size)) * 100;
@@ -280,7 +280,7 @@ function renderTradingSnapshotBox(s) {
 // ---------- Generic checklist (morning routine + consistency) ----------
 
 async function loadChecklist(table, items, date) {
-  const { data } = await supabase.from(table).select('*').eq('log_date', date);
+  const { data } = await sb.from(table).select('*').eq('log_date', date);
   const byName = {};
   (data || []).forEach(row => { byName[row.item_name] = row; });
   return items.map(name => ({
@@ -317,7 +317,7 @@ function attachChecklistHandlers(table, idPrefix) {
       const today = todayISO();
       const completed = e.target.checked;
 
-      const { data: existing } = await supabase
+      const { data: existing } = await sb
         .from(table)
         .select('id')
         .eq('log_date', today)
@@ -325,9 +325,9 @@ function attachChecklistHandlers(table, idPrefix) {
         .maybeSingle();
 
       if (existing) {
-        await supabase.from(table).update({ completed }).eq('id', existing.id);
+        await sb.from(table).update({ completed }).eq('id', existing.id);
       } else {
-        await supabase.from(table).insert({ log_date: today, item_name: itemName, completed });
+        await sb.from(table).insert({ log_date: today, item_name: itemName, completed });
       }
     });
   });
@@ -336,7 +336,7 @@ function attachChecklistHandlers(table, idPrefix) {
 // ---------- Top 3 goals ----------
 
 async function loadTopGoals(date) {
-  const { data } = await supabase.from('top_goals').select('*').eq('log_date', date).order('slot');
+  const { data } = await sb.from('top_goals').select('*').eq('log_date', date).order('slot');
   const bySlot = {};
   (data || []).forEach(row => { bySlot[row.slot] = row; });
   return [1, 2, 3].map(slot => ({
@@ -369,16 +369,16 @@ function attachTopGoalsHandlers() {
   const today = todayISO();
 
   async function upsertSlot(slot, fields) {
-    const { data: existing } = await supabase
+    const { data: existing } = await sb
       .from('top_goals')
       .select('id')
       .eq('log_date', today)
       .eq('slot', slot)
       .maybeSingle();
     if (existing) {
-      await supabase.from('top_goals').update(fields).eq('id', existing.id);
+      await sb.from('top_goals').update(fields).eq('id', existing.id);
     } else {
-      await supabase.from('top_goals').insert({ log_date: today, slot, ...fields });
+      await sb.from('top_goals').insert({ log_date: today, slot, ...fields });
     }
   }
 
@@ -402,7 +402,7 @@ function attachTopGoalsHandlers() {
 // ---------- Task list ----------
 
 async function loadActiveTasks() {
-  const { data } = await supabase
+  const { data } = await sb
     .from('tasks')
     .select('*')
     .eq('status', 'active')
@@ -439,7 +439,7 @@ function attachTaskListHandlers() {
   list.querySelectorAll('input[data-task-check]').forEach(cb => {
     cb.addEventListener('change', async (e) => {
       const id = e.target.dataset.taskCheck;
-      await supabase.from('tasks').update({ status: 'done', date_completed: todayISO() }).eq('id', id);
+      await sb.from('tasks').update({ status: 'done', date_completed: todayISO() }).eq('id', id);
       const row = e.target.closest('.check-row');
       if (row) row.style.opacity = '0.4';
     });
@@ -450,7 +450,7 @@ function attachTaskListHandlers() {
     const input = document.getElementById('new-task-input');
     const text = input.value.trim();
     if (!text) return;
-    await supabase.from('tasks').insert({ text, status: 'active', date_created: todayISO() });
+    await sb.from('tasks').insert({ text, status: 'active', date_created: todayISO() });
     input.value = '';
     renderDailyTab();
   });
