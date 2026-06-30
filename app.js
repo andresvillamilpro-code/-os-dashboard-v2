@@ -233,11 +233,11 @@ async function loadTradingSnapshot() {
     .gte('open_time', monday + 'T00:00:00Z');
 
   const trades = weekTrades || [];
-  const wins = trades.filter(t => Number(t.profit) > 0).length;
-  const losses = trades.filter(t => Number(t.profit) <= 0).length;
+  const wins = trades.filter(t => netResult(t) > 0).length;
+  const losses = trades.filter(t => netResult(t) <= 0).length;
 
   const { data: allTrades } = await sb.from('trades').select('profit');
-  const totalPnl = (allTrades || []).reduce((sum, t) => sum + Number(t.profit || 0), 0);
+  const totalPnl = (allTrades || []).reduce((sum, t) => sum + netResult(t), 0);
   const currentBalance = Number(settings.account_size) + totalPnl;
   const pnlPct = (totalPnl / Number(settings.account_size)) * 100;
 
@@ -551,6 +551,12 @@ async function fetchTodayEvents(token) {
 
 const TRADING_CHARTS = {}; // holds Chart.js instances so we can destroy/recreate on re-render
 
+// FTMO's real account balance = Profit + Swap + Commission per trade, not Profit alone.
+// Verified against the live FTMO dashboard: Profit-only undercounted the real balance.
+function netResult(t) {
+  return Number(t.profit || 0) + Number(t.swap || 0) + Number(t.commission || 0);
+}
+
 function getMondaySundayRange(weeksAgo = 0) {
   const monday = getMondayOfWeek();
   monday.setDate(monday.getDate() - weeksAgo * 7);
@@ -711,8 +717,8 @@ async function saveTradingSettings(fields) {
 // ---------- Stats calculations ----------
 
 function computeTradeStats(trades) {
-  const wins = trades.filter(t => Number(t.profit) > 0);
-  const losses = trades.filter(t => Number(t.profit) <= 0);
+  const wins = trades.filter(t => netResult(t) > 0);
+  const losses = trades.filter(t => netResult(t) <= 0);
   const winRate = trades.length ? Math.round((wins.length / trades.length) * 100) : 0;
 
   const rrValues = trades
@@ -753,7 +759,7 @@ async function renderTradingTab() {
   const trades = tradesRaw || [];
 
   const accountSize = Number(settings.account_size);
-  const totalPnl = trades.reduce((sum, t) => sum + Number(t.profit || 0), 0);
+  const totalPnl = trades.reduce((sum, t) => sum + netResult(t), 0);
   const currentBalance = accountSize + totalPnl;
   const targetBalance = accountSize * (1 + Number(settings.profit_target_pct) / 100);
   const pnlPct = accountSize ? (totalPnl / accountSize) * 100 : 0;
@@ -769,9 +775,9 @@ async function renderTradingTab() {
     return d >= lastWeek.start && d <= lastWeek.end;
   });
   const lastWeekStats = computeTradeStats(lastWeekTrades);
-  const lastWeekPnl = lastWeekTrades.reduce((s, t) => s + Number(t.profit || 0), 0);
-  const lastWeekBest = lastWeekTrades.length ? Math.max(...lastWeekTrades.map(t => Number(t.profit || 0))) : 0;
-  const lastWeekWorst = lastWeekTrades.length ? Math.min(...lastWeekTrades.map(t => Number(t.profit || 0))) : 0;
+  const lastWeekPnl = lastWeekTrades.reduce((s, t) => s + netResult(t), 0);
+  const lastWeekBest = lastWeekTrades.length ? Math.max(...lastWeekTrades.map(t => netResult(t))) : 0;
+  const lastWeekWorst = lastWeekTrades.length ? Math.min(...lastWeekTrades.map(t => netResult(t))) : 0;
 
   // avg trades/week
   let avgTradesPerWeek = trades.length;
@@ -783,10 +789,10 @@ async function renderTradingTab() {
   }
 
   // Winners / losers breakdown
-  const winnerProfits = wins.map(t => Number(t.profit));
-  const loserProfits = losses.map(t => Number(t.profit));
-  const winStreak = maxStreak(trades, t => Number(t.profit) > 0);
-  const lossStreak = maxStreak(trades, t => Number(t.profit) <= 0);
+  const winnerProfits = wins.map(t => netResult(t));
+  const loserProfits = losses.map(t => netResult(t));
+  const winStreak = maxStreak(trades, t => netResult(t) > 0);
+  const lossStreak = maxStreak(trades, t => netResult(t) <= 0);
 
   // By instrument
   const byInstrument = {};
@@ -808,7 +814,7 @@ async function renderTradingTab() {
   let running = accountSize;
   const balancePoints = [{ x: 'Start', y: running }];
   trades.forEach(t => {
-    running += Number(t.profit || 0);
+    running += netResult(t);
     balancePoints.push({ x: new Date(t.open_time).toLocaleDateString(), y: running });
   });
 
@@ -893,7 +899,10 @@ async function renderTradingTab() {
     </div>
 
     <div class="card">
-      <p class="card-title">By time of day</p>
+      <div class="card-header">
+        <p class="card-title" style="margin-bottom:0;">By time of day</p>
+        <span class="card-meta">Broker server time (as recorded by MT5) — not your local time</span>
+      </div>
       <div class="chart-wrap-sm"><canvas id="hour-chart"></canvas></div>
     </div>
 
