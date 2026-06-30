@@ -549,6 +549,38 @@ async function fetchTodayEvents(token) {
 // TRADING TAB
 // ============================================
 
+// FTMO's MT5 server time runs on GMT+2 (winter) / GMT+3 (summer) — Eastern European
+// Time, switching DST on Europe's schedule. The viewer is in Eastern time (GMT-5/-4),
+// switching DST on North America's schedule — these two shift on different dates, so a
+// fixed-hour offset would be wrong for part of the year. This does a real DST-aware
+// conversion via Intl, using Europe/Helsinki as a reference EET/EEST zone.
+//
+// Note: the literal server-time digits (the numbers as written in the FTMO CSV) are
+// recovered here using the JS Date object's LOCAL getters, because trades are imported
+// and viewed from the same Eastern-timezone browser, which makes that round trip exact.
+function serverTimeToLocalParts(date, targetTimeZone = 'America/Toronto') {
+  const y = date.getFullYear(), mo = date.getMonth(), d = date.getDate();
+  const hh = date.getHours(), mm = date.getMinutes(), ss = date.getSeconds();
+  const naiveUTC = Date.UTC(y, mo, d, hh, mm, ss);
+
+  // Find the EET/EEST UTC offset at this moment (DST-aware) — matches FTMO's documented GMT+2/+3 server time
+  const serverFmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/Helsinki', hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit'
+  });
+  const sp = Object.fromEntries(serverFmt.formatToParts(new Date(naiveUTC)).map(p => [p.type, p.value]));
+  const serverHour = sp.hour === '24' ? 0 : Number(sp.hour);
+  const serverAsUTC = Date.UTC(Number(sp.year), Number(sp.month) - 1, Number(sp.day), serverHour, Number(sp.minute), Number(sp.second));
+  const realUTC = naiveUTC - (serverAsUTC - naiveUTC);
+
+  // Express that true instant in the viewer's local time zone (DST-aware)
+  const localFmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: targetTimeZone, hour12: false, weekday: 'short', hour: '2-digit'
+  });
+  const lp = Object.fromEntries(localFmt.formatToParts(new Date(realUTC)).map(p => [p.type, p.value]));
+  return { hour: (lp.hour === '24' ? 0 : Number(lp.hour)), weekday: lp.weekday };
+}
+
 const TRADING_CHARTS = {}; // holds Chart.js instances so we can destroy/recreate on re-render
 
 // FTMO's real account balance = Profit + Swap + Commission per trade, not Profit alone.
@@ -801,14 +833,17 @@ async function renderTradingTab() {
     byInstrument[sym] = (byInstrument[sym] || 0) + 1;
   });
 
-  // By day of week
+  // By day of week + time of day — converted from FTMO's MT5 server time
+  // (GMT+2/+3, Prague-aligned DST) to the viewer's actual local time zone.
   const dowNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const byDow = [0, 0, 0, 0, 0, 0, 0];
-  trades.forEach(t => { byDow[new Date(t.open_time).getDay()]++; });
-
-  // By time of day (hour buckets)
   const byHour = new Array(24).fill(0);
-  trades.forEach(t => { byHour[new Date(t.open_time).getHours()]++; });
+  trades.forEach(t => {
+    const { hour, weekday } = serverTimeToLocalParts(new Date(t.open_time));
+    byHour[hour]++;
+    const dowIdx = dowNames.indexOf(weekday);
+    if (dowIdx >= 0) byDow[dowIdx]++;
+  });
 
   // Balance over time
   let running = accountSize;
@@ -901,7 +936,7 @@ async function renderTradingTab() {
     <div class="card">
       <div class="card-header">
         <p class="card-title" style="margin-bottom:0;">By time of day</p>
-        <span class="card-meta">Broker server time (as recorded by MT5) — not your local time</span>
+        <span class="card-meta">Converted to your local time zone (from FTMO's MT5 server time)</span>
       </div>
       <div class="chart-wrap-sm"><canvas id="hour-chart"></canvas></div>
     </div>
