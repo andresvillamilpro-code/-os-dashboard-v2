@@ -35,7 +35,7 @@ try {
 const GOOGLE_CLIENT_ID = '915567420685-hdr89piauoouang6lp1vlaiu33p6n4jb.apps.googleusercontent.com';
 const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
 
-const MISSION_STATEMENT = '"You are building a funded trading career, mastering AI, and creating a Spanish content empire — simultaneously. Every day either moves the mission forward or it doesn\'t. There is no neutral."';
+const MISSION_STATEMENT = '"No discipline seems pleasant at the time, but painful. Later on, however, it produces a harvest of righteousness and peace for those who have been trained by it." — Hebrews 12:11';
 
 const MORNING_ROUTINE_ITEMS = [
   'Wake before 6am',
