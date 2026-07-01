@@ -5,8 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OS — Andres Villamil</title>
   <style>
-    /* ── RESET & BASE ── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ── DARK THEME (default) ── */
     :root {
       --bg: #0a0a0a;
       --bg2: #141414;
@@ -32,13 +33,44 @@
       --purple-border: #2a2850;
       --blue: #378ADD;
       --blue-bg: #0c1a2e;
+      --topbar-bg: #0f0f0f;
       --radius: 10px;
       --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
-    body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; }
+
+    /* ── WARM CREAM THEME ── */
+    body.theme-cream {
+      --bg: #F5F1EB;
+      --bg2: #FDFAF5;
+      --bg3: #EDEAE3;
+      --border: #D0CCC4;
+      --border2: #D8D4CC;
+      --text: #1A1814;
+      --text2: #2D2A26;
+      --text3: #666058;
+      --text4: #9E9890;
+      --green: #0F7A58;
+      --green-bg: #E4F3EC;
+      --green-border: #A8D8C4;
+      --amber: #A86C0A;
+      --amber-bg: #FBF1DC;
+      --amber-border: #E8CC88;
+      --red: #C0312F;
+      --red-bg: #FAEAEA;
+      --red-border: #EBB4B4;
+      --purple: #534AB7;
+      --purple-light: #6B62CC;
+      --purple-bg: #EEEDFE;
+      --purple-border: #C4C0F0;
+      --blue: #1A68C0;
+      --blue-bg: #E4EEF9;
+      --topbar-bg: #EDEAE3;
+    }
+
+    body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; transition: background .2s, color .2s; }
 
     /* ── TOP BAR ── */
-    .topbar { position: sticky; top: 0; z-index: 100; background: #0f0f0f; border-bottom: 0.5px solid var(--border2); padding: 12px 20px; }
+    .topbar { position: sticky; top: 0; z-index: 100; background: var(--topbar-bg); border-bottom: 0.5px solid var(--border2); padding: 12px 20px; transition: background .2s; }
     .tb-row1 { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
     .tb-logo { display: flex; align-items: center; gap: 10px; }
     .tb-icon { font-size: 20px; }
@@ -49,11 +81,22 @@
     .tab-btn:hover { color: var(--text3); border-color: var(--border); }
     .tab-btn.active { background: var(--purple); color: #EEEDFE; border-color: var(--purple); }
 
+    /* ── THEME TOGGLE BUTTON ── */
+    .theme-toggle {
+      display: flex; align-items: center; gap: 6px;
+      padding: 5px 12px; border-radius: 20px; cursor: pointer;
+      border: 0.5px solid var(--border); background: var(--bg2);
+      color: var(--text3); font-size: 11px; font-weight: 500;
+      transition: all .15s; white-space: nowrap; user-select: none;
+    }
+    .theme-toggle:hover { border-color: var(--purple); color: var(--purple-light); }
+    .theme-toggle-icon { font-size: 14px; }
+
     /* ── MAIN CONTENT ── */
     .main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 
     /* ── CARDS ── */
-    .card { background: var(--bg2); border: 0.5px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 10px; }
+    .card { background: var(--bg2); border: 0.5px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 10px; transition: background .2s, border-color .2s; }
     .card-title { font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: .08em; color: var(--text3); margin-bottom: 10px; }
     .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
     .card-meta { font-size: 11px; color: var(--text4); }
@@ -61,7 +104,8 @@
     @media (max-width: 768px) { .two-col { grid-template-columns: 1fr; } .main { padding: 12px; } }
 
     /* ── IDENTITY BANNER ── */
-    .identity-banner { border-left: 2px solid var(--purple); padding: 10px 14px; background: var(--purple-bg); border-radius: 0 8px 8px 0; margin-bottom: 16px; font-size: 12px; color: #AFA9EC; line-height: 1.7; font-style: italic; font-weight: 500; }
+    .identity-banner { border-left: 2px solid var(--purple); padding: 10px 14px; background: var(--purple-bg); border-radius: 0 8px 8px 0; margin-bottom: 16px; font-size: 12px; color: #7F77DD; line-height: 1.7; font-style: italic; font-weight: 500; }
+    body.theme-cream .identity-banner { color: #534AB7; }
 
     /* ── CHECKLISTS ── */
     .check-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 0.5px solid var(--border2); }
@@ -111,6 +155,23 @@
     }
     .empty-state { text-align: center; padding: 20px 10px; color: var(--text4); font-size: 12px; }
     .loading-text { color: var(--text4); font-size: 13px; text-align: center; padding: 16px; }
+
+    /* ── COLOR HELPERS ── */
+    .g { color: var(--green); }
+    .a { color: var(--amber); }
+    .r { color: var(--red); }
+    .p { color: var(--purple-light); }
+    .b { color: var(--blue); }
+    .w { color: var(--text); }
+    .dim { color: var(--text4); }
+  </style>
+
+  <!-- Apply saved theme immediately — prevents flash on load -->
+  <script>
+    if (localStorage.getItem('os_theme') === 'cream') document.documentElement.classList.add('theme-cream-pending');
+  </script>
+  <style>
+    .theme-cream-pending body, body.theme-cream { }
   </style>
 </head>
 <body>
@@ -120,6 +181,10 @@
     <div class="tb-logo">
       <div class="tb-icon">⚡</div>
       <div class="tb-title">OS — Andres Villamil</div>
+    </div>
+    <div class="theme-toggle" id="theme-toggle" onclick="toggleTheme()">
+      <span class="theme-toggle-icon" id="theme-icon">🌙</span>
+      <span id="theme-label">Dark</span>
     </div>
   </div>
   <div class="nav-tabs" id="tab-bar">
@@ -152,6 +217,28 @@
     const btn = e.target.closest('.tab-btn');
     if (btn) switchTab(btn.dataset.tab);
   });
+
+  function applyTheme(theme) {
+    if (theme === 'cream') {
+      document.body.classList.add('theme-cream');
+      document.getElementById('theme-icon').textContent = '☀️';
+      document.getElementById('theme-label').textContent = 'Cream';
+    } else {
+      document.body.classList.remove('theme-cream');
+      document.getElementById('theme-icon').textContent = '🌙';
+      document.getElementById('theme-label').textContent = 'Dark';
+    }
+  }
+
+  function toggleTheme() {
+    const current = localStorage.getItem('os_theme') || 'dark';
+    const next = current === 'dark' ? 'cream' : 'dark';
+    localStorage.setItem('os_theme', next);
+    applyTheme(next);
+  }
+
+  // Apply saved theme on load
+  applyTheme(localStorage.getItem('os_theme') || 'dark');
 </script>
 </body>
 </html>
