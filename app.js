@@ -592,7 +592,13 @@ function renderCalendarCard() {
     <div class="card">
       <div class="card-header">
         <p class="card-title" style="margin-bottom:0;">Calendar</p>
-        <span id="cal-status" class="card-meta"></span>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span id="cal-status" class="card-meta"></span>
+          <a href="https://calendar.google.com" target="_blank" rel="noopener"
+            style="font-size:11px;color:var(--purple-light);font-weight:500;text-decoration:none;padding:3px 9px;border:0.5px solid var(--purple-border);border-radius:6px;white-space:nowrap;">
+            Open Google Calendar ↗
+          </a>
+        </div>
       </div>
       <div id="calendar-events">
         <div class="empty-state">
