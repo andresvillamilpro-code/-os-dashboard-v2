@@ -1485,7 +1485,7 @@ function attachMuscleGridHandlers(weekStart) {
       if (existing) {
         await sb.from('fitness_muscle_log').update({ trained }).eq('id', existing.id);
       } else {
-        await sb.from('fitness_muscle_log').insert({ week_start: weekStart, muscle_group: muscle, day_date, trained });
+        await sb.from('fitness_muscle_log').insert({ week_start: weekStart, muscle_group: muscle, day_date, trained, user_id: (await sb.auth.getUser()).data.user.id });
       }
     });
   });
@@ -1502,7 +1502,7 @@ function attachCardioGridHandlers(weekStart) {
       if (existing) {
         await sb.from('fitness_cardio_log').update({ done }).eq('id', existing.id);
       } else {
-        await sb.from('fitness_cardio_log').insert({ week_start: weekStart, cardio_type, day_date, done });
+        await sb.from('fitness_cardio_log').insert({ week_start: weekStart, cardio_type, day_date, done, user_id: (await sb.auth.getUser()).data.user?.id });
       }
     });
   });
@@ -1524,7 +1524,7 @@ async function saveLiftUpdate() {
   const value = parseFloat(rawVal);
   if (!liftName || isNaN(value) || value <= 0) return;
   const lift = STRENGTH_LIFTS.find(l => l.name === liftName);
-  await sb.from('fitness_strength').insert({ lift_name: liftName, value, unit: lift?.unit || '', logged_at: new Date().toISOString() });
+  await sb.from('fitness_strength').insert({ lift_name: liftName, value, unit: lift?.unit || '', logged_at: new Date().toISOString(), user_id: (await sb.auth.getUser()).data.user?.id });
   renderFitnessTab();
 }
 
@@ -1541,7 +1541,7 @@ function attachWeightSleepHandlers(weekStart, dates) {
         if (existing) {
           await sb.from('fitness_weight_log').update({ weight_lbs }).eq('id', existing.id);
         } else {
-          await sb.from('fitness_weight_log').insert({ week_start: weekStart, weight_lbs });
+          await sb.from('fitness_weight_log').insert({ week_start: weekStart, weight_lbs, user_id: (await sb.auth.getUser()).data.user?.id });
         }
       }, 600);
     });
@@ -1555,7 +1555,7 @@ function attachWeightSleepHandlers(weekStart, dates) {
       if (existing) {
         await sb.from('fitness_sleep_log').update({ slept_7plus }).eq('id', existing.id);
       } else {
-        await sb.from('fitness_sleep_log').insert({ log_date, slept_7plus });
+        await sb.from('fitness_sleep_log').insert({ log_date, slept_7plus, user_id: (await sb.auth.getUser()).data.user?.id });
       }
     });
   });
@@ -1577,7 +1577,7 @@ function attachPhotoHandlers(weekStart) {
       if (existing) {
         await sb.from('fitness_photos').update({ url: urlData.publicUrl, path }).eq('id', existing.id);
       } else {
-        await sb.from('fitness_photos').insert({ week_start: weekStart, photo_type, url: urlData.publicUrl, path });
+        await sb.from('fitness_photos').insert({ week_start: weekStart, photo_type, url: urlData.publicUrl, path, user_id: (await sb.auth.getUser()).data.user?.id });
       }
       renderFitnessTab();
     });
