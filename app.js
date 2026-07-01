@@ -1242,7 +1242,7 @@ async function renderFitnessTab() {
   ]);
 
   // ── Last week stats ──
-  const lastMuscleGroups = new Set(muscleLast.filter(r => r.trained).map(r => r.muscle_group));
+  const lastTrainingDays = new Set(muscleLast.filter(r => r.trained).map(r => r.day_date));
   const lastCardioDays = new Set(cardioLast.filter(r => r.done).map(r => r.day_date));
   const lastSleep7 = sleepRows.filter(r => lastWeekDates.includes(r.log_date) && r.slept_7plus).length;
   const lastWeight = weightLast[0]?.weight_lbs;
@@ -1285,7 +1285,7 @@ async function renderFitnessTab() {
       </div>
       <div class="stat-grid-4">
         <div class="stat-box"><div class="stat-box-value">${lastWeight != null ? lastWeight + ' lb' : '—'}</div><div class="stat-box-label">Weight</div></div>
-        <div class="stat-box"><div class="stat-box-value">${lastMuscleGroups.size} / 10</div><div class="stat-box-label">Groups trained</div></div>
+        <div class="stat-box"><div class="stat-box-value">${lastTrainingDays.size} / 5</div><div class="stat-box-label">Days trained</div></div>
         <div class="stat-box"><div class="stat-box-value">${lastCardioDays.size}</div><div class="stat-box-label">Cardio sessions</div></div>
         <div class="stat-box"><div class="stat-box-value">${lastSleep7} / 7</div><div class="stat-box-label">7h+ sleep days</div></div>
       </div>
