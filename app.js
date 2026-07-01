@@ -152,7 +152,7 @@ function escapeHtml(str) {
 const TAB_RENDERERS = {
   daily: renderDailyTab,
   trading: renderTradingTab,
-  fitness: () => renderPlaceholderTab('Fitness', 'Fitness tab is being built next — coming soon.'),
+  fitness: renderFitnessTab,
   goals: () => renderPlaceholderTab('Goals', 'Goals tracker is coming soon.'),
   calendar: () => renderPlaceholderTab('Calendar', 'Full calendar tab is coming soon.')
 };
@@ -1160,6 +1160,428 @@ function drawTradingCharts({ balancePoints, byInstrument, byDow, dowNames, byHou
       options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: textColor, font: { size: 8 }, maxTicksLimit: 12 }, grid: { display: false } }, y: { ticks: { color: textColor, font: { size: 10 } }, grid: { color: gridColor } } }, responsive: true, maintainAspectRatio: false }
     });
   }
+}
+
+// ============================================
+// FITNESS TAB
+// ============================================
+
+const MUSCLE_GROUPS = ['Chest', 'Back', 'Shoulders', 'Biceps', 'Triceps', 'Quads', 'Hamstrings', 'Glutes', 'Calves', 'Core'];
+const CARDIO_TYPES = ['Running', 'Cycling', 'Boxing'];
+const STRENGTH_LIFTS = [
+  { name: 'Bench press', unit: 'lb' },
+  { name: 'Squat', unit: 'lb' },
+  { name: 'Deadlift', unit: 'lb' },
+  { name: 'Overhead press', unit: 'lb' },
+  { name: 'Pull-ups', unit: 'reps' }
+];
+const DOW_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const WEIGHT_GOAL_LBS = 200;
+// Supplement items synced with Daily tab's consistency_log (same table, same data)
+const SUPPLEMENT_ITEMS = ['160g protein', 'Creatine', 'Zinc', 'Magnesium'];
+
+function fitnessWeekStart(weeksAgo = 0) {
+  const mon = getMondayOfWeek();
+  mon.setDate(mon.getDate() - weeksAgo * 7);
+  return isoDate(mon);
+}
+
+function getWeekDates(weekStartISO) {
+  // Returns ISO date strings for Mon–Sun of the given week
+  const start = new Date(weekStartISO + 'T12:00:00');
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(start);
+    d.setDate(d.getDate() + i);
+    return isoDate(d);
+  });
+}
+
+function formatWeekRange(weekStartISO) {
+  const start = new Date(weekStartISO + 'T12:00:00');
+  const end = new Date(start);
+  end.setDate(end.getDate() + 6);
+  const opts = { day: 'numeric', month: 'short' };
+  return `${start.toLocaleDateString(undefined, opts)} – ${end.toLocaleDateString(undefined, opts)}`;
+}
+
+async function safeQuery(queryPromise) {
+  try { const r = await queryPromise; return r.data || []; } catch { return []; }
+}
+
+async function renderFitnessTab() {
+  const container = document.getElementById('tab-content');
+  container.innerHTML = '<p class="loading-text">Loading fitness data...</p>';
+  const user = await requireAuth();
+  if (!user) return;
+
+  const thisWeek = fitnessWeekStart(0);
+  const lastWeek = fitnessWeekStart(1);
+  const today = todayISO();
+  const thisWeekDates = getWeekDates(thisWeek);
+  const lastWeekDates = getWeekDates(lastWeek);
+
+  const [
+    muscleThis, muscleLast,
+    cardioThis, cardioLast,
+    strength,
+    sleepRows,
+    weightThis, weightLast,
+    supplementsToday,
+    photoRows
+  ] = await Promise.all([
+    safeQuery(sb.from('fitness_muscle_log').select('*').eq('week_start', thisWeek)),
+    safeQuery(sb.from('fitness_muscle_log').select('*').eq('week_start', lastWeek)),
+    safeQuery(sb.from('fitness_cardio_log').select('*').eq('week_start', thisWeek)),
+    safeQuery(sb.from('fitness_cardio_log').select('*').eq('week_start', lastWeek)),
+    safeQuery(sb.from('fitness_strength').select('*').order('logged_at', { ascending: false })),
+    safeQuery(sb.from('fitness_sleep_log').select('*').gte('log_date', lastWeek).lte('log_date', thisWeekDates[6])),
+    safeQuery(sb.from('fitness_weight_log').select('*').eq('week_start', thisWeek).limit(1)),
+    safeQuery(sb.from('fitness_weight_log').select('*').eq('week_start', lastWeek).limit(1)),
+    safeQuery(sb.from('consistency_log').select('*').eq('log_date', today)),
+    safeQuery(sb.from('fitness_photos').select('*').in('week_start', [thisWeek, lastWeek]))
+  ]);
+
+  // ── Last week stats ──
+  const lastMuscleGroups = new Set(muscleLast.filter(r => r.trained).map(r => r.muscle_group));
+  const lastCardioDays = new Set(cardioLast.filter(r => r.done).map(r => r.day_date));
+  const lastSleep7 = sleepRows.filter(r => lastWeekDates.includes(r.log_date) && r.slept_7plus).length;
+  const lastWeight = weightLast[0]?.weight_lbs;
+
+  // ── This week maps ──
+  const muscleMap = {};
+  muscleThis.forEach(r => { muscleMap[`${r.muscle_group}-${r.day_date}`] = r.trained; });
+
+  const cardioMap = {};
+  cardioThis.forEach(r => { cardioMap[`${r.cardio_type}-${r.day_date}`] = r.done; });
+
+  const sleepMap = {};
+  sleepRows.filter(r => thisWeekDates.includes(r.log_date)).forEach(r => { sleepMap[r.log_date] = r.slept_7plus; });
+
+  // ── Strength: latest per lift ──
+  const strengthMap = {};
+  strength.forEach(r => { if (!strengthMap[r.lift_name]) strengthMap[r.lift_name] = r; });
+
+  // ── Supplements synced with Daily ──
+  const suppMap = {};
+  supplementsToday.forEach(r => { suppMap[r.item_name] = r.completed; });
+
+  // ── Weight & goal ──
+  const currentWeight = weightThis[0]?.weight_lbs;
+  const weightGoalPct = currentWeight ? Math.min(100, (currentWeight / WEIGHT_GOAL_LBS) * 100) : 0;
+  const weightToGo = currentWeight ? Math.max(0, WEIGHT_GOAL_LBS - currentWeight) : null;
+
+  // ── Photos ──
+  const frontPhoto = photoRows.find(r => r.week_start === thisWeek && r.photo_type === 'front');
+  const backPhoto  = photoRows.find(r => r.week_start === thisWeek && r.photo_type === 'back');
+
+  // ── Render ──
+  container.innerHTML = `
+
+    <!-- Weekly review -->
+    <div class="card">
+      <div class="card-header">
+        <p class="card-title" style="margin-bottom:0;">Weekly review — last week</p>
+        <span class="card-meta">${formatWeekRange(lastWeek)}</span>
+      </div>
+      <div class="stat-grid-4">
+        <div class="stat-box"><div class="stat-box-value">${lastWeight != null ? lastWeight + ' lb' : '—'}</div><div class="stat-box-label">Weight</div></div>
+        <div class="stat-box"><div class="stat-box-value">${lastMuscleGroups.size} / 10</div><div class="stat-box-label">Groups trained</div></div>
+        <div class="stat-box"><div class="stat-box-value">${lastCardioDays.size}</div><div class="stat-box-label">Cardio sessions</div></div>
+        <div class="stat-box"><div class="stat-box-value">${lastSleep7} / 7</div><div class="stat-box-label">7h+ sleep days</div></div>
+      </div>
+    </div>
+
+    <!-- Muscle group grid -->
+    <div class="card">
+      <p class="card-title">Muscle groups trained — this week</p>
+      ${renderMuscleGrid(muscleMap, thisWeekDates)}
+    </div>
+
+    <!-- Cardio grid -->
+    <div class="card">
+      <p class="card-title">Cardio — this week</p>
+      ${renderCardioGrid(cardioMap, thisWeekDates)}
+    </div>
+
+    <!-- Strength + Weight & Sleep -->
+    <div class="two-col">
+      <div class="card">
+        <p class="card-title">Strength — current numbers</p>
+        ${renderStrengthTable(strengthMap)}
+      </div>
+      <div class="card">
+        <p class="card-title">Weight &amp; sleep</p>
+        ${renderWeightSleepCard(currentWeight, sleepMap, thisWeekDates)}
+      </div>
+    </div>
+
+    <!-- Supplements (synced with Daily tab) -->
+    <div class="card">
+      <div class="card-header">
+        <p class="card-title" style="margin-bottom:0;">Supplements — today</p>
+        <span class="card-meta">Synced with Daily tab</span>
+      </div>
+      <div id="fitness-supplements-list">
+        ${SUPPLEMENT_ITEMS.map((item) => {
+          const idx = CONSISTENCY_ITEMS.indexOf(item);
+          return `<div class="check-row">
+            <input type="checkbox" data-idx="${idx}" ${suppMap[item] ? 'checked' : ''} />
+            <label class="check-label">${escapeHtml(item)}</label>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+
+    <!-- Weekly photo check -->
+    <div class="card">
+      <p class="card-title">Weekly photo check</p>
+      <div class="two-col">
+        ${renderPhotoSlot('front', frontPhoto)}
+        ${renderPhotoSlot('back', backPhoto)}
+      </div>
+    </div>
+
+    <!-- Weight goal progress -->
+    <div class="card">
+      <div class="card-header">
+        <p class="card-title" style="margin-bottom:0;">Weight goal progress</p>
+        <span style="font-size:12px; font-weight:500; color:var(--text);">${currentWeight != null ? currentWeight + ' lb' : '—'} / ${WEIGHT_GOAL_LBS} lb</span>
+      </div>
+      <div class="progress-track">
+        <div class="progress-fill" style="width:${weightGoalPct.toFixed(1)}%; background:var(--green);"></div>
+      </div>
+      <p style="font-size:11px; color:var(--text4); margin-top:6px;">
+        ${weightToGo != null ? `${weightToGo} lb to go` : 'Enter your weekly weight above to track progress'}
+      </p>
+    </div>
+  `;
+
+  attachMuscleGridHandlers(thisWeek);
+  attachCardioGridHandlers(thisWeek);
+  attachStrengthHandlers();
+  attachWeightSleepHandlers(thisWeek, thisWeekDates);
+  attachChecklistHandlers('consistency_log', 'fitness-supplements');
+  attachPhotoHandlers(thisWeek);
+}
+
+// ── Grid renderers ──
+
+function renderMuscleGrid(muscleMap, dates) {
+  let html = `<div style="display:grid; grid-template-columns:110px repeat(7,1fr); gap:4px; align-items:center;">`;
+  html += `<div></div>`;
+  DOW_LABELS.forEach(d => {
+    html += `<div style="text-align:center; font-size:10px; color:var(--text4); font-weight:500; padding-bottom:4px;">${d}</div>`;
+  });
+  MUSCLE_GROUPS.forEach(group => {
+    html += `<div style="font-size:12px; color:var(--text2); padding:3px 0;">${group}</div>`;
+    dates.forEach(dateStr => {
+      const checked = muscleMap[`${group}-${dateStr}`] || false;
+      html += `<div style="text-align:center; padding:3px 0;">
+        <input type="checkbox" data-muscle="${escapeHtml(group)}" data-date="${dateStr}" ${checked ? 'checked' : ''}
+          style="width:16px;height:16px;accent-color:var(--purple);cursor:pointer;" />
+      </div>`;
+    });
+  });
+  html += `</div>`;
+  return html;
+}
+
+function renderCardioGrid(cardioMap, dates) {
+  let html = `<div style="display:grid; grid-template-columns:110px repeat(7,1fr); gap:4px; align-items:center;">`;
+  html += `<div></div>`;
+  DOW_LABELS.forEach(d => {
+    html += `<div style="text-align:center; font-size:10px; color:var(--text4); font-weight:500; padding-bottom:4px;">${d}</div>`;
+  });
+  CARDIO_TYPES.forEach(type => {
+    html += `<div style="font-size:12px; color:var(--text2); padding:3px 0;">${type}</div>`;
+    dates.forEach(dateStr => {
+      const checked = cardioMap[`${type}-${dateStr}`] || false;
+      html += `<div style="text-align:center; padding:3px 0;">
+        <input type="checkbox" data-cardio="${escapeHtml(type)}" data-date="${dateStr}" ${checked ? 'checked' : ''}
+          style="width:16px;height:16px;accent-color:var(--blue);cursor:pointer;" />
+      </div>`;
+    });
+  });
+  html += `</div>`;
+  return html;
+}
+
+function renderStrengthTable(strengthMap) {
+  let rows = STRENGTH_LIFTS.map(lift => {
+    const row = strengthMap[lift.name];
+    const val = row ? `${row.value} ${lift.unit}` : '—';
+    return `<div class="check-row">
+      <span class="check-label" style="flex:1;">${lift.name}</span>
+      <span style="font-size:13px;font-weight:500;color:var(--text);">${val}</span>
+    </div>`;
+  }).join('');
+  rows += `
+    <button class="btn-secondary" id="update-lift-btn" style="width:100%;margin-top:10px;">+ Update a lift</button>
+    <div id="update-lift-form" style="display:none;margin-top:10px;">
+      <select id="lift-select" style="width:100%;background:var(--bg3);border:0.5px solid var(--border);border-radius:7px;padding:7px 10px;font-size:12px;color:var(--text2);outline:none;margin-bottom:6px;font-family:var(--font);">
+        ${STRENGTH_LIFTS.map(l => `<option value="${l.name}">${l.name} (${l.unit})</option>`).join('')}
+      </select>
+      <div style="display:flex;gap:6px;">
+        <input type="number" id="lift-value" placeholder="Enter value" style="flex:1;" />
+        <button class="btn-secondary" onclick="saveLiftUpdate()">Save</button>
+      </div>
+    </div>`;
+  return rows;
+}
+
+function renderWeightSleepCard(currentWeight, sleepMap, dates) {
+  const sleepDots = dates.map((dateStr, i) => {
+    const slept = sleepMap[dateStr] || false;
+    return `<div style="text-align:center;">
+      <input type="checkbox" data-sleep-date="${dateStr}" ${slept ? 'checked' : ''}
+        style="width:16px;height:16px;accent-color:var(--blue);cursor:pointer;display:block;margin:0 auto 3px;" />
+      <div style="font-size:9px;color:var(--text4);">${DOW_LABELS[i][0]}</div>
+    </div>`;
+  }).join('');
+
+  return `
+    <div style="margin-bottom:14px;">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">This week's weight</div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="number" id="weight-input" placeholder="e.g. 194" value="${currentWeight != null ? currentWeight : ''}"
+          style="flex:1;background:var(--bg3);border:0.5px solid var(--border);border-radius:7px;padding:8px 10px;font-size:14px;font-weight:500;color:var(--text);outline:none;font-family:var(--font);" />
+        <span style="font-size:12px;color:var(--text4);">lb</span>
+      </div>
+      <div style="font-size:10px;color:var(--text4);margin-top:4px;">Goal: ${WEIGHT_GOAL_LBS} lb</div>
+    </div>
+    <div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:8px;">7h+ sleep this week</div>
+      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;">${sleepDots}</div>
+    </div>`;
+}
+
+function renderPhotoSlot(type, photo) {
+  const label = type === 'front' ? 'Front photo' : 'Back photo';
+  if (photo?.url) {
+    return `<div style="border:0.5px dashed var(--border);border-radius:8px;overflow:hidden;position:relative;">
+      <img src="${escapeHtml(photo.url)}" style="width:100%;height:180px;object-fit:cover;display:block;" />
+      <label style="position:absolute;bottom:8px;right:8px;background:var(--purple);color:#EEEDFE;border-radius:6px;padding:4px 10px;font-size:10px;font-weight:500;cursor:pointer;">
+        Replace<input type="file" accept="image/*" data-photo-type="${type}" style="display:none;" />
+      </label>
+    </div>`;
+  }
+  return `<label style="display:block;border:0.5px dashed var(--border);border-radius:8px;padding:36px 14px;text-align:center;cursor:pointer;background:var(--bg3);">
+    <div style="font-size:26px;margin-bottom:6px;">📷</div>
+    <div style="font-size:11px;color:var(--text4);">${label}</div>
+    <input type="file" accept="image/*" data-photo-type="${type}" style="display:none;" />
+  </label>`;
+}
+
+// ── Handlers ──
+
+function attachMuscleGridHandlers(weekStart) {
+  document.querySelectorAll('input[data-muscle]').forEach(cb => {
+    cb.addEventListener('change', async (e) => {
+      const muscle = e.target.dataset.muscle;
+      const day_date = e.target.dataset.date;
+      const trained = e.target.checked;
+      const { data: existing } = await sb.from('fitness_muscle_log').select('id')
+        .eq('week_start', weekStart).eq('muscle_group', muscle).eq('day_date', day_date).maybeSingle();
+      if (existing) {
+        await sb.from('fitness_muscle_log').update({ trained }).eq('id', existing.id);
+      } else {
+        await sb.from('fitness_muscle_log').insert({ week_start: weekStart, muscle_group: muscle, day_date, trained });
+      }
+    });
+  });
+}
+
+function attachCardioGridHandlers(weekStart) {
+  document.querySelectorAll('input[data-cardio]').forEach(cb => {
+    cb.addEventListener('change', async (e) => {
+      const cardio_type = e.target.dataset.cardio;
+      const day_date = e.target.dataset.date;
+      const done = e.target.checked;
+      const { data: existing } = await sb.from('fitness_cardio_log').select('id')
+        .eq('week_start', weekStart).eq('cardio_type', cardio_type).eq('day_date', day_date).maybeSingle();
+      if (existing) {
+        await sb.from('fitness_cardio_log').update({ done }).eq('id', existing.id);
+      } else {
+        await sb.from('fitness_cardio_log').insert({ week_start: weekStart, cardio_type, day_date, done });
+      }
+    });
+  });
+}
+
+function attachStrengthHandlers() {
+  const btn = document.getElementById('update-lift-btn');
+  const form = document.getElementById('update-lift-form');
+  if (btn && form) {
+    btn.addEventListener('click', () => {
+      form.style.display = form.style.display === 'none' ? 'block' : 'none';
+    });
+  }
+}
+
+async function saveLiftUpdate() {
+  const liftName = document.getElementById('lift-select')?.value;
+  const rawVal = document.getElementById('lift-value')?.value;
+  const value = parseFloat(rawVal);
+  if (!liftName || isNaN(value) || value <= 0) return;
+  const lift = STRENGTH_LIFTS.find(l => l.name === liftName);
+  await sb.from('fitness_strength').insert({ lift_name: liftName, value, unit: lift?.unit || '', logged_at: new Date().toISOString() });
+  renderFitnessTab();
+}
+
+function attachWeightSleepHandlers(weekStart, dates) {
+  const weightInput = document.getElementById('weight-input');
+  if (weightInput) {
+    let debounce;
+    weightInput.addEventListener('input', (e) => {
+      clearTimeout(debounce);
+      debounce = setTimeout(async () => {
+        const weight_lbs = parseFloat(e.target.value);
+        if (isNaN(weight_lbs) || weight_lbs <= 0) return;
+        const { data: existing } = await sb.from('fitness_weight_log').select('id').eq('week_start', weekStart).maybeSingle();
+        if (existing) {
+          await sb.from('fitness_weight_log').update({ weight_lbs }).eq('id', existing.id);
+        } else {
+          await sb.from('fitness_weight_log').insert({ week_start: weekStart, weight_lbs });
+        }
+      }, 600);
+    });
+  }
+
+  document.querySelectorAll('input[data-sleep-date]').forEach(cb => {
+    cb.addEventListener('change', async (e) => {
+      const log_date = e.target.dataset.sleepDate;
+      const slept_7plus = e.target.checked;
+      const { data: existing } = await sb.from('fitness_sleep_log').select('id').eq('log_date', log_date).maybeSingle();
+      if (existing) {
+        await sb.from('fitness_sleep_log').update({ slept_7plus }).eq('id', existing.id);
+      } else {
+        await sb.from('fitness_sleep_log').insert({ log_date, slept_7plus });
+      }
+    });
+  });
+}
+
+function attachPhotoHandlers(weekStart) {
+  document.querySelectorAll('input[data-photo-type]').forEach(input => {
+    input.addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      const photo_type = e.target.dataset.photoType;
+      if (!file) return;
+      const ext = file.name.split('.').pop() || 'jpg';
+      const path = `${weekStart}/${photo_type}.${ext}`;
+      const { error } = await sb.storage.from('fitness-photos').upload(path, file, { upsert: true });
+      if (error) { console.error('Photo upload error:', error.message); return; }
+      const { data: urlData } = sb.storage.from('fitness-photos').getPublicUrl(path);
+      const { data: existing } = await sb.from('fitness_photos').select('id')
+        .eq('week_start', weekStart).eq('photo_type', photo_type).maybeSingle();
+      if (existing) {
+        await sb.from('fitness_photos').update({ url: urlData.publicUrl, path }).eq('id', existing.id);
+      } else {
+        await sb.from('fitness_photos').insert({ week_start: weekStart, photo_type, url: urlData.publicUrl, path });
+      }
+      renderFitnessTab();
+    });
+  });
 }
 
 // ============================================
