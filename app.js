@@ -818,18 +818,55 @@ async function renderTradingTab() {
 
   const { wins, losses, winRate, medianRMultiple } = computeTradeStats(trades);
 
-  // This week / weekly review (last completed week)
+  // ── THIS WEEK (Mon–Fri window) ──
   const thisWeek = getMondaySundayRange(0);
-  const lastWeek = getMondaySundayRange(1);
   const thisWeekTrades = trades.filter(t => new Date(t.open_time) >= thisWeek.start);
-  const lastWeekTrades = trades.filter(t => {
-    const d = new Date(t.open_time);
-    return d >= lastWeek.start && d <= lastWeek.end;
-  });
-  const lastWeekStats = computeTradeStats(lastWeekTrades);
-  const lastWeekPnl = lastWeekTrades.reduce((s, t) => s + netResult(t), 0);
-  const lastWeekBest = lastWeekTrades.length ? Math.max(...lastWeekTrades.map(t => netResult(t))) : 0;
-  const lastWeekWorst = lastWeekTrades.length ? Math.min(...lastWeekTrades.map(t => netResult(t))) : 0;
+  const thisWeekStats = computeTradeStats(thisWeekTrades);
+  const thisWeekPnl = thisWeekTrades.reduce((s, t) => s + netResult(t), 0);
+  const thisWeekLosses = thisWeekTrades.filter(t => netResult(t) <= 0).length;
+  const thisWeekWins = thisWeekTrades.filter(t => netResult(t) > 0).length;
+  const maxTradesLeft = Math.max(0, Number(settings.max_trades_per_week) - thisWeekTrades.length);
+  const maxLossesLeft = Math.max(0, Number(settings.max_losses_per_week) - thisWeekLosses);
+
+  // Determine week status
+  const today = new Date();
+  const todayDow = today.getDay(); // 0=Sun, 6=Sat
+  const tradingDayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+  const currentDayName = todayDow >= 1 && todayDow <= 5 ? tradingDayNames[todayDow - 1] : null;
+  const daysRemaining = todayDow >= 1 && todayDow <= 5 ? 5 - todayDow : 0;
+
+  let weekStatus, weekStatusColor, weekStatusBg, weekAlert;
+  if (thisWeekLosses >= Number(settings.max_losses_per_week)) {
+    weekStatus = '⛔ Stop trading — max losses reached';
+    weekStatusColor = 'var(--red)';
+    weekStatusBg = 'var(--red-bg)';
+    weekAlert = `You've hit ${thisWeekLosses} losses this week (limit: ${settings.max_losses_per_week}). Do not take any more trades until Monday.`;
+  } else if (thisWeekTrades.length >= Number(settings.max_trades_per_week)) {
+    weekStatus = '⚠️ Trade limit reached';
+    weekStatusColor = 'var(--amber)';
+    weekStatusBg = 'var(--amber-bg)';
+    weekAlert = `${thisWeekTrades.length} trades taken this week (limit: ${settings.max_trades_per_week}). Wait until Monday to trade again.`;
+  } else if (thisWeekPnl < -Number(accountSize) * 0.025) {
+    weekStatus = '⚠️ Down more than 2.5% — be careful';
+    weekStatusColor = 'var(--amber)';
+    weekStatusBg = 'var(--amber-bg)';
+    weekAlert = `You are down $${Math.abs(thisWeekPnl).toFixed(0)} this week. Reduce size and focus on clean setups only.`;
+  } else if (thisWeekTrades.length === 0) {
+    weekStatus = currentDayName ? `No trades yet — ${currentDayName}` : 'Weekend — markets closed';
+    weekStatusColor = 'var(--text4)';
+    weekStatusBg = 'var(--bg3)';
+    weekAlert = currentDayName ? 'Week is open. Stay patient, wait for A+ setups only.' : 'Rest, review, and prepare your plan for Monday.';
+  } else if (thisWeekPnl >= 0) {
+    weekStatus = '✅ Positive week so far';
+    weekStatusColor = 'var(--green)';
+    weekStatusBg = 'var(--green-bg)';
+    weekAlert = `Up $${thisWeekPnl.toFixed(0)} with ${daysRemaining} trading day${daysRemaining !== 1 ? 's' : ''} remaining. Protect the gains — only A+ setups.`;
+  } else {
+    weekStatus = '📉 Negative week — stay disciplined';
+    weekStatusColor = 'var(--text3)';
+    weekStatusBg = 'var(--bg3)';
+    weekAlert = `Down $${Math.abs(thisWeekPnl).toFixed(0)} this week. Stay patient, stick to the process.`;
+  }
 
   // avg trades/week
   let avgTradesPerWeek = trades.length;
@@ -853,8 +890,7 @@ async function renderTradingTab() {
     byInstrument[sym] = (byInstrument[sym] || 0) + 1;
   });
 
-  // By day of week + time of day — converted from FTMO's MT5 server time
-  // (GMT+2/+3, Prague-aligned DST) to the viewer's actual local time zone.
+  // By day of week + time of day — converted from FTMO's MT5 server time to local time
   const dowNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const byDow = [0, 0, 0, 0, 0, 0, 0];
   const byHour = new Array(24).fill(0);
@@ -882,17 +918,35 @@ async function renderTradingTab() {
   const lastUpload = localStorage.getItem('trading_last_upload');
   const lastUploadText = lastUpload ? new Date(lastUpload).toLocaleString() : 'Never uploaded yet';
 
+  const mondayStr = thisWeek.start.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const fridayEnd = new Date(thisWeek.start); fridayEnd.setDate(fridayEnd.getDate() + 4);
+  const fridayStr = fridayEnd.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
   container.innerHTML = `
-    <div class="card">
-      <p class="card-title">Last week review</p>
-      ${lastWeekTrades.length ? `
-        <div class="stat-grid-4">
-          <div class="stat-box"><div class="stat-box-value">${lastWeekTrades.length}</div><div class="stat-box-label">Trades</div></div>
-          <div class="stat-box"><div class="stat-box-value ${lastWeekStats.winRate >= 50 ? 'g' : 'a'}">${lastWeekStats.winRate}%</div><div class="stat-box-label">Win rate</div></div>
-          <div class="stat-box"><div class="stat-box-value ${lastWeekPnl >= 0 ? 'g' : 'r'}">${lastWeekPnl >= 0 ? '+' : ''}$${lastWeekPnl.toFixed(0)}</div><div class="stat-box-label">P&amp;L</div></div>
-          <div class="stat-box"><div class="stat-box-value g">+$${lastWeekBest.toFixed(0)}</div><div class="stat-box-label">Best trade</div></div>
+    <div class="card" style="border-left: 2px solid ${weekStatusColor};">
+      <div class="card-header">
+        <p class="card-title" style="margin-bottom:0;">This week — ${mondayStr} to ${fridayStr}</p>
+        <span style="font-size:11px; font-weight:500; color:${weekStatusColor};">${weekStatus}</span>
+      </div>
+      <div style="background:${weekStatusBg}; border-radius:6px; padding:10px 12px; margin-bottom:12px; font-size:12px; color:${weekStatusColor}; font-weight:500;">${weekAlert}</div>
+      <div class="stat-grid-4">
+        <div class="stat-box">
+          <div class="stat-box-value ${thisWeekPnl >= 0 ? 'g' : 'r'}">${thisWeekPnl >= 0 ? '+' : ''}$${thisWeekPnl.toFixed(0)}</div>
+          <div class="stat-box-label">P&amp;L this week</div>
         </div>
-      ` : '<p class="empty-state">No trades logged last week.</p>'}
+        <div class="stat-box">
+          <div class="stat-box-value">${thisWeekTrades.length} / ${settings.max_trades_per_week}</div>
+          <div class="stat-box-label">Trades used</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-box-value ${thisWeekLosses >= settings.max_losses_per_week ? 'r' : 'w'}">${thisWeekLosses} / ${settings.max_losses_per_week}</div>
+          <div class="stat-box-label">Losses</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-box-value ${thisWeekStats.winRate >= 50 ? 'g' : 'a'}">${thisWeekTrades.length ? thisWeekStats.winRate + '%' : '—'}</div>
+          <div class="stat-box-label">Win rate</div>
+        </div>
+      </div>
     </div>
 
     <div class="card">
@@ -964,7 +1018,11 @@ async function renderTradingTab() {
     <div class="stat-grid-3">
       <div class="card stat-box"><div class="stat-box-value">${medianRMultiple != null ? (medianRMultiple >= 0 ? "+" : "") + medianRMultiple.toFixed(2) + "R" : "—"}</div><div class="stat-box-label">Median R-multiple</div></div>
       <div class="card stat-box"><div class="stat-box-value">${avgTradesPerWeek}</div><div class="stat-box-label">Avg trades / week</div></div>
-      <div class="card stat-box"><div class="stat-box-value">${thisWeekTrades.length} / ${settings.max_trades_per_week}</div><div class="stat-box-label">This week</div></div>
+      <div class="card stat-box">
+        <div class="stat-box-value g">+$${winnerProfits.length ? (winnerProfits.reduce((a,b)=>a+b,0)/winnerProfits.length).toFixed(0) : '—'}</div>
+        <div class="stat-box-label">Avg win</div>
+        <div style="font-size:11px;color:var(--red);margin-top:4px;">−$${loserProfits.length ? Math.abs(loserProfits.reduce((a,b)=>a+b,0)/loserProfits.length).toFixed(0) : '—'} avg loss</div>
+      </div>
     </div>
 
     <div class="card">
@@ -1025,8 +1083,13 @@ function drawTradingCharts({ balancePoints, byInstrument, byDow, dowNames, byHou
   if (balanceEl) {
     TRADING_CHARTS.balance = new Chart(balanceEl, {
       type: 'line',
-      data: { labels: balancePoints.map(p => p.x), datasets: [{ data: balancePoints.map(p => p.y), borderColor: purple, backgroundColor: 'rgba(127,119,221,0.1)', fill: true, tension: 0.3, pointRadius: 0 }] },
-      options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: textColor, font: { size: 9 }, maxTicksLimit: 6 }, grid: { display: false } }, y: { ticks: { color: textColor, font: { size: 10 } }, grid: { color: gridColor } } }, responsive: true, maintainAspectRatio: false }
+      data: { labels: balancePoints.map(p => p.x), datasets: [{ data: balancePoints.map(p => p.y), borderColor: purple, backgroundColor: 'rgba(127,119,221,0.1)', fill: true, tension: 0.3, pointRadius: 0, pointHoverRadius: 5, pointHoverBackgroundColor: purple }] },
+      options: {
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => '$' + ctx.parsed.y.toLocaleString(undefined, { maximumFractionDigits: 2 }) } } },
+        scales: { x: { ticks: { color: textColor, font: { size: 9 }, maxTicksLimit: 6 }, grid: { display: false } }, y: { ticks: { color: textColor, font: { size: 10 }, callback: v => '$' + (v/1000).toFixed(0) + 'k' }, grid: { color: gridColor } } },
+        responsive: true, maintainAspectRatio: false
+      }
     });
   }
 
