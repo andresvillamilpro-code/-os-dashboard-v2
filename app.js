@@ -199,7 +199,6 @@ async function renderDailyTab() {
 
   container.innerHTML = `
     <div class="identity-banner">${MISSION_STATEMENT}</div>
-    ${renderTradingSnapshotBox(snapshot)}
     ${renderChecklistCard('Morning routine', 'morning-routine', routine)}
     ${renderCalendarCard()}
     <div class="two-col">
@@ -207,6 +206,7 @@ async function renderDailyTab() {
       ${renderTaskListCard(tasks)}
     </div>
     ${renderChecklistCard('Consistency check', 'consistency', consistency)}
+    ${renderTradingSnapshotBox(snapshot)}
   `;
 
   attachChecklistHandlers('morning_routine_log', 'morning-routine');
@@ -216,39 +216,72 @@ async function renderDailyTab() {
   initGoogleCalendar();
 }
 
-// ---------- Trading snapshot box ----------
+// ---------- Trading snapshot box (Daily tab) ----------
 
 async function loadTradingSnapshot() {
-  const monday = isoDate(getMondayOfWeek());
+  const thisWeek = getMondayOfWeek();
+  const mondayISO = isoDate(thisWeek);
 
-  const { data: settingsRows } = await sb.from('trading_settings').select('*').limit(1);
+  const [settingsRows, weekTradesRaw, allTradesRaw] = await Promise.all([
+    sb.from('trading_settings').select('*').limit(1).then(r => r.data),
+    sb.from('trades').select('profit, swap, commission, open_time').gte('open_time', mondayISO + 'T00:00:00Z').then(r => r.data),
+    sb.from('trades').select('profit, swap, commission').then(r => r.data)
+  ]);
+
   const settings = settingsRows?.[0] || {
     account_size: 100000, profit_target_pct: 10,
-    max_drawdown_pct: 10, daily_loss_limit_pct: 5
+    max_drawdown_pct: 10, daily_loss_limit_pct: 5,
+    max_trades_per_week: 10, max_losses_per_week: 3
   };
 
-  const { data: weekTrades } = await sb
-    .from('trades')
-    .select('profit, open_time')
-    .gte('open_time', monday + 'T00:00:00Z');
+  const weekTrades = weekTradesRaw || [];
+  const allTrades = allTradesRaw || [];
 
-  const trades = weekTrades || [];
-  const wins = trades.filter(t => netResult(t) > 0).length;
-  const losses = trades.filter(t => netResult(t) <= 0).length;
+  const totalPnl = allTrades.reduce((sum, t) => sum + netResult(t), 0);
+  const accountSize = Number(settings.account_size);
+  const currentBalance = accountSize + totalPnl;
+  const pnlPct = (totalPnl / accountSize) * 100;
 
-  const { data: allTrades } = await sb.from('trades').select('profit');
-  const totalPnl = (allTrades || []).reduce((sum, t) => sum + netResult(t), 0);
-  const currentBalance = Number(settings.account_size) + totalPnl;
-  const pnlPct = (totalPnl / Number(settings.account_size)) * 100;
+  const weekPnl = weekTrades.reduce((sum, t) => sum + netResult(t), 0);
+  const weekWins = weekTrades.filter(t => netResult(t) > 0).length;
+  const weekLosses = weekTrades.filter(t => netResult(t) <= 0).length;
+
+  // Week status logic (same as Trading tab)
+  let weekStatus, weekStatusColor, weekAlert;
+  if (weekLosses >= Number(settings.max_losses_per_week)) {
+    weekStatus = '⛔ Stop trading — max losses reached';
+    weekStatusColor = 'var(--red)';
+    weekAlert = `${weekLosses} losses this week (limit: ${settings.max_losses_per_week}). No more trades until Monday.`;
+  } else if (weekTrades.length >= Number(settings.max_trades_per_week)) {
+    weekStatus = '⚠️ Trade limit reached';
+    weekStatusColor = 'var(--amber)';
+    weekAlert = `${weekTrades.length} trades taken (limit: ${settings.max_trades_per_week}). Wait until Monday.`;
+  } else if (weekPnl < -accountSize * 0.025) {
+    weekStatus = '⚠️ Down 2.5%+ this week';
+    weekStatusColor = 'var(--amber)';
+    weekAlert = `Down $${Math.abs(weekPnl).toFixed(0)} this week. Reduce size, focus on A+ setups only.`;
+  } else if (weekPnl > 0) {
+    weekStatus = '✅ Positive week';
+    weekStatusColor = 'var(--green)';
+    weekAlert = `Up $${weekPnl.toFixed(0)} this week. Protect the gains — A+ setups only.`;
+  } else if (weekTrades.length === 0) {
+    weekStatus = 'No trades yet this week';
+    weekStatusColor = 'var(--text4)';
+    weekAlert = 'Stay patient. Wait for A+ setups only.';
+  } else {
+    weekStatus = 'Negative week — stay disciplined';
+    weekStatusColor = 'var(--text3)';
+    weekAlert = `Down $${Math.abs(weekPnl).toFixed(0)} this week. Stick to the process.`;
+  }
 
   return {
-    accountSize: Number(settings.account_size),
-    currentBalance,
-    pnlPct,
+    accountSize, currentBalance, pnlPct,
     profitTargetPct: Number(settings.profit_target_pct),
-    weekTradesCount: trades.length,
-    weekWins: wins,
-    weekLosses: losses
+    weekPnl, weekWins, weekLosses,
+    weekTradesCount: weekTrades.length,
+    maxTradesPerWeek: Number(settings.max_trades_per_week),
+    maxLossesPerWeek: Number(settings.max_losses_per_week),
+    weekStatus, weekStatusColor, weekAlert
   };
 }
 
@@ -256,22 +289,29 @@ function renderTradingSnapshotBox(s) {
   if (!s) return '';
   const pnlClass = s.pnlPct >= 0 ? 'g' : 'r';
   return `
-    <div class="card">
+    <div class="card" style="border-left: 2px solid ${s.weekStatusColor};">
       <div class="card-header">
-        <p class="card-title" style="margin-bottom:0;">Trading snapshot</p>
-        <span class="card-meta">This week</span>
+        <p class="card-title" style="margin-bottom:0;">Trading — this week</p>
+        <span style="font-size:11px; font-weight:500; color:${s.weekStatusColor};">${s.weekStatus}</span>
       </div>
-      <div class="check-row" style="border:none;">
-        <span class="check-label">Account balance</span>
-        <span class="check-label" style="margin-left:auto; font-weight:500; color:var(--text);">$${s.currentBalance.toLocaleString(undefined, {maximumFractionDigits: 0})}</span>
-      </div>
-      <div class="check-row" style="border:none;">
-        <span class="check-label">P&amp;L vs target</span>
-        <span class="check-label" style="margin-left:auto; font-weight:500;" class="${pnlClass}">${s.pnlPct >= 0 ? '+' : ''}${s.pnlPct.toFixed(1)}% / ${s.profitTargetPct}%</span>
-      </div>
-      <div class="check-row" style="border:none;">
-        <span class="check-label">Trades this week</span>
-        <span class="check-label" style="margin-left:auto; font-weight:500; color:var(--text);">${s.weekTradesCount} (${s.weekWins}W ${s.weekLosses}L)</span>
+      <div style="background:var(--bg3); border-radius:6px; padding:8px 12px; margin-bottom:12px; font-size:12px; color:${s.weekStatusColor}; font-weight:500;">${s.weekAlert}</div>
+      <div class="stat-grid-4">
+        <div class="stat-box">
+          <div class="stat-box-value ${s.weekPnl >= 0 ? 'g' : 'r'}">${s.weekPnl >= 0 ? '+' : ''}$${s.weekPnl.toFixed(0)}</div>
+          <div class="stat-box-label">P&amp;L this week</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-box-value">${s.weekTradesCount} / ${s.maxTradesPerWeek}</div>
+          <div class="stat-box-label">Trades used</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-box-value ${s.weekLosses >= s.maxLossesPerWeek ? 'r' : 'w'}">${s.weekLosses} / ${s.maxLossesPerWeek}</div>
+          <div class="stat-box-label">Losses</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-box-value ${s.pnlPct >= 0 ? 'g' : 'r'}">${s.pnlPct >= 0 ? '+' : ''}${s.pnlPct.toFixed(1)}% / ${s.profitTargetPct}%</div>
+          <div class="stat-box-label">Total P&amp;L vs target</div>
+        </div>
       </div>
     </div>
   `;
