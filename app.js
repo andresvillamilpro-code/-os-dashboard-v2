@@ -1215,6 +1215,8 @@ async function renderFitnessTab() {
   if (!user) return;
 
   maybeLockWeekSnapshot(); // Fire-and-forget — locks this week on Sundays
+
+  const thisWeek = fitnessWeekStart(0);
   const today = todayISO();
   const thisWeekDates = getWeekDates(thisWeek);
 
