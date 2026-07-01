@@ -1214,40 +1214,39 @@ async function renderFitnessTab() {
   const user = await requireAuth();
   if (!user) return;
 
-  const thisWeek = fitnessWeekStart(0);
-  const lastWeek = fitnessWeekStart(1);
+  maybeLockWeekSnapshot(); // Fire-and-forget — locks this week on Sundays
   const today = todayISO();
   const thisWeekDates = getWeekDates(thisWeek);
-  const lastWeekDates = getWeekDates(lastWeek);
+
+  // How many days have passed so far this week (Mon=1 through today)
+  const todayDow = new Date().getDay(); // 0=Sun
+  const daysPassedThisWeek = todayDow === 0 ? 7 : todayDow; // Sun counts as day 7
 
   const [
-    muscleThis, muscleLast,
-    cardioThis, cardioLast,
+    muscleThis,
+    cardioThis,
     strength,
     sleepRows,
-    weightThis, weightLast,
+    weightThis,
     supplementsToday,
     photoRows
   ] = await Promise.all([
     safeQuery(sb.from('fitness_muscle_log').select('*').eq('week_start', thisWeek)),
-    safeQuery(sb.from('fitness_muscle_log').select('*').eq('week_start', lastWeek)),
     safeQuery(sb.from('fitness_cardio_log').select('*').eq('week_start', thisWeek)),
-    safeQuery(sb.from('fitness_cardio_log').select('*').eq('week_start', lastWeek)),
     safeQuery(sb.from('fitness_strength').select('*').order('logged_at', { ascending: false })),
-    safeQuery(sb.from('fitness_sleep_log').select('*').gte('log_date', lastWeek).lte('log_date', thisWeekDates[6])),
+    safeQuery(sb.from('fitness_sleep_log').select('*').gte('log_date', thisWeek).lte('log_date', thisWeekDates[6])),
     safeQuery(sb.from('fitness_weight_log').select('*').eq('week_start', thisWeek).limit(1)),
-    safeQuery(sb.from('fitness_weight_log').select('*').eq('week_start', lastWeek).limit(1)),
     safeQuery(sb.from('consistency_log').select('*').eq('log_date', today)),
-    safeQuery(sb.from('fitness_photos').select('*').in('week_start', [thisWeek, lastWeek]))
+    safeQuery(sb.from('fitness_photos').select('*').eq('week_start', thisWeek))
   ]);
 
-  // ── Last week stats ──
-  const lastTrainingDays = new Set(muscleLast.filter(r => r.trained).map(r => r.day_date));
-  const lastCardioDays = new Set(cardioLast.filter(r => r.done).map(r => r.day_date));
-  const lastSleep7 = sleepRows.filter(r => lastWeekDates.includes(r.log_date) && r.slept_7plus).length;
-  const lastWeight = weightLast[0]?.weight_lbs;
+  // ── This week live stats (always reflect current state) ──
+  const thisTrainingDays = new Set(muscleThis.filter(r => r.trained).map(r => r.day_date));
+  const thisCardioDays   = new Set(cardioThis.filter(r => r.done).map(r => r.day_date));
+  const thisSleep7Count  = sleepRows.filter(r => r.slept_7plus).length;
+  const currentWeight    = weightThis[0]?.weight_lbs;
 
-  // ── This week maps ──
+  // ── This week maps (for grids — individual checkboxes) ──
   const muscleMap = {};
   muscleThis.forEach(r => { muscleMap[`${r.muscle_group}-${r.day_date}`] = r.trained; });
 
@@ -1255,7 +1254,7 @@ async function renderFitnessTab() {
   cardioThis.forEach(r => { cardioMap[`${r.cardio_type}-${r.day_date}`] = r.done; });
 
   const sleepMap = {};
-  sleepRows.filter(r => thisWeekDates.includes(r.log_date)).forEach(r => { sleepMap[r.log_date] = r.slept_7plus; });
+  sleepRows.forEach(r => { sleepMap[r.log_date] = r.slept_7plus; });
 
   // ── Strength: latest per lift ──
   const strengthMap = {};
@@ -1266,28 +1265,46 @@ async function renderFitnessTab() {
   supplementsToday.forEach(r => { suppMap[r.item_name] = r.completed; });
 
   // ── Weight & goal ──
-  const currentWeight = weightThis[0]?.weight_lbs;
   const weightGoalPct = currentWeight ? Math.min(100, (currentWeight / WEIGHT_GOAL_LBS) * 100) : 0;
-  const weightToGo = currentWeight ? Math.max(0, WEIGHT_GOAL_LBS - currentWeight) : null;
+  const weightToGo    = currentWeight ? Math.max(0, WEIGHT_GOAL_LBS - currentWeight) : null;
 
   // ── Photos ──
-  const frontPhoto = photoRows.find(r => r.week_start === thisWeek && r.photo_type === 'front');
-  const backPhoto  = photoRows.find(r => r.week_start === thisWeek && r.photo_type === 'back');
+  const frontPhoto = photoRows.find(r => r.photo_type === 'front');
+  const backPhoto  = photoRows.find(r => r.photo_type === 'back');
+
+  // ── Week status message ──
+  let weekStatus, weekStatusColor;
+  if (thisTrainingDays.size >= 5) {
+    weekStatus = '✅ Training goal hit — 5 days done';
+    weekStatusColor = 'var(--green)';
+  } else if (thisTrainingDays.size >= 3) {
+    weekStatus = `💪 ${thisTrainingDays.size} of 5 days done — keep going`;
+    weekStatusColor = 'var(--amber)';
+  } else if (thisTrainingDays.size > 0) {
+    weekStatus = `${thisTrainingDays.size} of 5 training days logged so far`;
+    weekStatusColor = 'var(--text3)';
+  } else {
+    weekStatus = 'No training logged yet this week';
+    weekStatusColor = 'var(--text4)';
+  }
 
   // ── Render ──
   container.innerHTML = `
 
-    <!-- Weekly review -->
-    <div class="card">
+    <!-- This week live summary -->
+    <div class="card" style="border-left: 2px solid ${weekStatusColor};">
       <div class="card-header">
-        <p class="card-title" style="margin-bottom:0;">Weekly review — last week</p>
-        <span class="card-meta">${formatWeekRange(lastWeek)}</span>
+        <p class="card-title" style="margin-bottom:0;">This week — ${formatWeekRange(thisWeek)}</p>
+        <span style="font-size:11px; font-weight:500; color:${weekStatusColor};">${weekStatus}</span>
+      </div>
+      <div style="font-size:11px; color:var(--text4); margin-bottom:10px;">
+        Live — updates as you check boxes below. Final snapshot locks in Sunday night.
       </div>
       <div class="stat-grid-4">
-        <div class="stat-box"><div class="stat-box-value">${lastWeight != null ? lastWeight + ' lb' : '—'}</div><div class="stat-box-label">Weight</div></div>
-        <div class="stat-box"><div class="stat-box-value">${lastTrainingDays.size} / 5</div><div class="stat-box-label">Days trained</div></div>
-        <div class="stat-box"><div class="stat-box-value">${lastCardioDays.size}</div><div class="stat-box-label">Cardio sessions</div></div>
-        <div class="stat-box"><div class="stat-box-value">${lastSleep7} / 7</div><div class="stat-box-label">7h+ sleep days</div></div>
+        <div class="stat-box"><div class="stat-box-value ${currentWeight ? 'w' : 'dim'}">${currentWeight != null ? currentWeight + ' lb' : '—'}</div><div class="stat-box-label">Weight</div></div>
+        <div class="stat-box"><div class="stat-box-value" style="color:${weekStatusColor};">${thisTrainingDays.size} / 5</div><div class="stat-box-label">Days trained</div></div>
+        <div class="stat-box"><div class="stat-box-value">${thisCardioDays.size}</div><div class="stat-box-label">Cardio sessions</div></div>
+        <div class="stat-box"><div class="stat-box-value ${thisSleep7Count >= 5 ? 'g' : 'a'}">${thisSleep7Count} / 7</div><div class="stat-box-label">7h+ sleep days</div></div>
       </div>
     </div>
 
@@ -1582,6 +1599,47 @@ function attachPhotoHandlers(weekStart) {
       renderFitnessTab();
     });
   });
+}
+
+// ── Weekly snapshot — runs on Sunday, locks the week permanently ──
+// Called automatically when the Fitness tab loads on a Sunday.
+// Saves a permanent summary of the closing week so it's preserved
+// even after next Monday's fresh week starts.
+
+async function maybeLockWeekSnapshot() {
+  const today = new Date();
+  if (today.getDay() !== 0) return; // Only runs on Sunday
+
+  const thisWeek = fitnessWeekStart(0);
+  const thisWeekDates = getWeekDates(thisWeek);
+
+  // Check if already snapshotted this week
+  const { data: existing } = await sb.from('fitness_weekly_snapshot').select('id').eq('week_start', thisWeek).maybeSingle().catch(() => ({ data: null }));
+  if (existing) return;
+
+  // Gather final state
+  const [muscleRows, cardioRows, sleepRows, weightRow] = await Promise.all([
+    safeQuery(sb.from('fitness_muscle_log').select('*').eq('week_start', thisWeek)),
+    safeQuery(sb.from('fitness_cardio_log').select('*').eq('week_start', thisWeek)),
+    safeQuery(sb.from('fitness_sleep_log').select('*').gte('log_date', thisWeek).lte('log_date', thisWeekDates[6])),
+    safeQuery(sb.from('fitness_weight_log').select('*').eq('week_start', thisWeek).limit(1))
+  ]);
+
+  const trainingDays = new Set(muscleRows.filter(r => r.trained).map(r => r.day_date)).size;
+  const cardioDays   = new Set(cardioRows.filter(r => r.done).map(r => r.day_date)).size;
+  const sleep7Days   = sleepRows.filter(r => r.slept_7plus).length;
+  const weight       = weightRow[0]?.weight_lbs ?? null;
+
+  const { data: { user } } = await sb.auth.getUser();
+  await sb.from('fitness_weekly_snapshot').insert({
+    week_start: thisWeek,
+    training_days: trainingDays,
+    cardio_days: cardioDays,
+    sleep_7plus_days: sleep7Days,
+    weight_lbs: weight,
+    user_id: user?.id,
+    locked_at: new Date().toISOString()
+  }).catch(() => {}); // Silent — table may not exist yet, doesn't break anything
 }
 
 // ============================================
