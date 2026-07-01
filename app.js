@@ -194,7 +194,7 @@ async function renderDailyTab() {
     loadChecklist('morning_routine_log', MORNING_ROUTINE_ITEMS, today),
     loadChecklist('consistency_log', CONSISTENCY_ITEMS, today),
     loadTopGoals(today),
-    loadActiveTasks()
+    loadTasks()
   ]);
 
   container.innerHTML = `
@@ -441,34 +441,53 @@ function attachTopGoalsHandlers() {
 
 // ---------- Task list ----------
 
-async function loadActiveTasks() {
-  const { data } = await sb
-    .from('tasks')
-    .select('*')
-    .eq('status', 'active')
-    .order('date_created', { ascending: true })
-    .limit(5);
-  return data || [];
+// ---------- Task list ----------
+
+async function loadTasks() {
+  const weekStart = isoDate(getMondayOfWeek());
+  // Load active tasks (all time) + tasks completed this week
+  const [activeRes, completedRes] = await Promise.all([
+    sb.from('tasks').select('*').eq('status', 'active').order('date_created', { ascending: true }),
+    sb.from('tasks').select('*').eq('status', 'done').gte('date_completed', weekStart).order('date_completed', { ascending: true })
+  ]);
+  return {
+    active: activeRes.data || [],
+    completed: completedRes.data || []
+  };
 }
 
 function renderTaskListCard(tasks) {
+  const { active, completed } = tasks;
+  const totalThisWeek = completed.length;
+  const completedRows = completed.map(t => `
+    <div class="check-row" data-task-id="${t.id}">
+      <input type="checkbox" checked data-task-check="${t.id}" />
+      <label class="check-label" style="text-decoration:line-through; color:var(--text4);">${escapeHtml(t.text)}</label>
+      <span style="font-size:10px; color:var(--text4); margin-left:auto; white-space:nowrap;">${t.date_completed || ''}</span>
+    </div>`).join('');
+
+  const activeRows = active.map(t => `
+    <div class="check-row" data-task-id="${t.id}">
+      <input type="checkbox" data-task-check="${t.id}" />
+      <label class="check-label">${escapeHtml(t.text)}</label>
+    </div>`).join('');
+
   return `
     <div class="card">
-      <p class="card-title">Task of the day</p>
+      <div class="card-header">
+        <p class="card-title" style="margin-bottom:0;">Task of the day</p>
+        ${totalThisWeek > 0 ? `<span class="card-meta">${totalThisWeek} done this week</span>` : ''}
+      </div>
       <div id="task-list">
-        ${tasks.length ? tasks.map(t => `
-          <div class="check-row" data-task-id="${t.id}">
-            <input type="checkbox" data-task-check="${t.id}" />
-            <label class="check-label ${t.date_created < todayISO() ? 'muted-italic' : ''}">${escapeHtml(t.text)}</label>
-          </div>
-        `).join('') : '<p class="empty-state">No tasks yet — add one below.</p>'}
+        ${activeRows || ''}
+        ${completedRows ? `<div style="border-top:0.5px solid var(--border2); margin:6px 0;"></div>${completedRows}` : ''}
+        ${!active.length && !completed.length ? '<p class="empty-state">No tasks yet — add one below.</p>' : ''}
       </div>
       <form id="add-task-form" style="display:flex; gap:8px; margin-top:10px;">
         <input type="text" id="new-task-input" placeholder="Add a task..." style="flex:1;" />
         <button type="submit" class="btn-secondary">Add</button>
       </form>
-    </div>
-  `;
+    </div>`;
 }
 
 function attachTaskListHandlers() {
@@ -479,9 +498,14 @@ function attachTaskListHandlers() {
   list.querySelectorAll('input[data-task-check]').forEach(cb => {
     cb.addEventListener('change', async (e) => {
       const id = e.target.dataset.taskCheck;
-      await sb.from('tasks').update({ status: 'done', date_completed: todayISO() }).eq('id', id);
-      const row = e.target.closest('.check-row');
-      if (row) row.style.opacity = '0.4';
+      const isDone = e.target.checked;
+      if (isDone) {
+        await sb.from('tasks').update({ status: 'done', date_completed: todayISO() }).eq('id', id);
+      } else {
+        // Uncheck — restore to active
+        await sb.from('tasks').update({ status: 'active', date_completed: null }).eq('id', id);
+      }
+      renderDailyTab(); // Refresh to move task between sections
     });
   });
 
