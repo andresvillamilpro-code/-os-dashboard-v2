@@ -153,7 +153,7 @@ const TAB_RENDERERS = {
   daily: renderDailyTab,
   trading: renderTradingTab,
   fitness: renderFitnessTab,
-  goals: () => renderPlaceholderTab('Goals', 'Goals tracker is coming soon.'),
+  goals: renderGoalsTab,
   calendar: () => renderPlaceholderTab('Calendar', 'Full calendar tab is coming soon.')
 };
 
@@ -1737,6 +1737,186 @@ async function maybeLockWeekSnapshot() {
     user_id: user?.id,
     locked_at: new Date().toISOString()
   }).catch(() => {}); // Silent — table may not exist yet, doesn't break anything
+}
+
+// ============================================
+// GOALS TAB — AI-powered analysis via Supabase Edge Function
+// ============================================
+
+const GOALS_META = [
+  { id: 1, name: 'Become a Disciplined Trader', priority: 'critical' },
+  { id: 2, name: 'Pass and Maintain FTMO $100K', priority: 'critical' },
+  { id: 3, name: 'Build an Elite Discipline System', priority: 'critical' },
+  { id: 4, name: 'Reach 200 lbs With Improved Strength', priority: 'high' },
+  { id: 5, name: 'Strengthen Relationship With God', priority: 'high' },
+  { id: 6, name: 'Build the Personal Brand of Andres', priority: 'medium' },
+  { id: 7, name: 'Build Your Personal Operating System', priority: 'medium' },
+  { id: 8, name: 'Become More Present With Family', priority: 'medium' },
+  { id: 9, name: 'Launch and Validate Inarmoni', priority: 'support' },
+];
+
+const PRIORITY_STYLE = {
+  critical: { color: 'var(--red)', bg: 'var(--red-bg)', label: 'Critical' },
+  high:     { color: 'var(--amber)', bg: 'var(--amber-bg)', label: 'High' },
+  medium:   { color: 'var(--purple-light)', bg: 'var(--purple-bg)', label: 'Medium' },
+  support:  { color: 'var(--text4)', bg: 'var(--bg3)', label: 'Support' },
+};
+
+const STATUS_STYLE = {
+  on_track: { color: 'var(--green)', label: '✅ On track' },
+  at_risk:  { color: 'var(--amber)', label: '⚠️ At risk' },
+  critical: { color: 'var(--red)', label: '⛔ Critical' },
+  no_data:  { color: 'var(--text4)', label: '— No data yet' },
+};
+
+const TREND_ICON = { up: '↑', down: '↓', stable: '→', no_data: '—' };
+
+async function renderGoalsTab() {
+  const container = document.getElementById('tab-content');
+  container.innerHTML = '<p class="loading-text">Loading goals analysis...</p>';
+
+  const user = await requireAuth();
+  if (!user) return;
+
+  // Load cached analysis from Supabase
+  const { data: cached } = await sb
+    .from('goals_analysis_cache')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (cached?.analysis) {
+    renderGoalsUI(cached.analysis, cached.created_at, false);
+  } else {
+    // No cache — trigger first analysis automatically
+    container.innerHTML = `
+      <div class="card" style="text-align:center; padding:24px;">
+        <p style="font-size:14px; font-weight:500; color:var(--text); margin-bottom:8px;">No analysis yet</p>
+        <p style="font-size:12px; color:var(--text4); margin-bottom:16px;">Claude will read all your data and score each goal. Takes about 5 seconds.</p>
+        <button class="btn-secondary" onclick="triggerGoalsAnalysis(false)">Run first analysis ↗</button>
+      </div>`;
+  }
+}
+
+async function triggerGoalsAnalysis(force = false) {
+  const container = document.getElementById('tab-content');
+  container.innerHTML = `
+    <div class="card" style="text-align:center; padding:32px;">
+      <div style="font-size:24px; margin-bottom:12px;">🤖</div>
+      <p style="font-size:14px; font-weight:500; color:var(--text); margin-bottom:6px;">Analyzing your data...</p>
+      <p style="font-size:12px; color:var(--text4);">Claude is reading your trades, habits, fitness, and sleep to score each goal.</p>
+    </div>`;
+
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) throw new Error('Not logged in');
+
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/analyze-goals`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session.access_token}`,
+        'apikey': SUPABASE_PUBLISHABLE_KEY,
+      },
+      body: JSON.stringify({ force })
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    const { analysis, cached_at } = await res.json();
+    renderGoalsUI(analysis, cached_at, true);
+
+  } catch (err) {
+    container.innerHTML = `
+      <div class="card">
+        <p class="card-title" style="color:var(--red);">Analysis failed</p>
+        <p class="empty-state">${escapeHtml(err.message)}</p>
+        <button class="btn-secondary" style="margin-top:10px;" onclick="triggerGoalsAnalysis(true)">Retry</button>
+      </div>`;
+  }
+}
+
+function renderGoalsUI(analysis, cachedAt, freshlyLoaded) {
+  const container = document.getElementById('tab-content');
+  if (!container || !analysis) return;
+
+  const { goals = [], overall_score = 0, weekly_summary = '', top_priority = '' } = analysis;
+
+  const scoreColor = overall_score >= 70 ? 'var(--green)' : overall_score >= 40 ? 'var(--amber)' : 'var(--red)';
+  const onTrack = goals.filter(g => g.status === 'on_track').length;
+  const atRisk = goals.filter(g => g.status === 'at_risk' || g.status === 'critical').length;
+  const noData = goals.filter(g => g.status === 'no_data').length;
+
+  const cachedLabel = cachedAt
+    ? `Last updated ${new Date(cachedAt).toLocaleString()}`
+    : 'Just updated';
+
+  const goalCards = GOALS_META.map(meta => {
+    const g = goals.find(x => x.id === meta.id) || { score: 0, trend: 'no_data', status: 'no_data', insight: 'No data available yet.' };
+    const pri = PRIORITY_STYLE[meta.priority] || PRIORITY_STYLE.support;
+    const stat = STATUS_STYLE[g.status] || STATUS_STYLE.no_data;
+    const scoreCol = g.score >= 70 ? 'var(--green)' : g.score >= 40 ? 'var(--amber)' : g.status === 'no_data' ? 'var(--text4)' : 'var(--red)';
+    const trend = TREND_ICON[g.trend] || '—';
+    const trendCol = g.trend === 'up' ? 'var(--green)' : g.trend === 'down' ? 'var(--red)' : 'var(--text4)';
+
+    return `
+      <div class="card" style="border-left: 2px solid ${pri.color}; margin-bottom:8px;">
+        <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:8px;">
+          <div style="flex:1;">
+            <div style="font-size:13px; font-weight:500; color:var(--text); margin-bottom:4px;">${escapeHtml(meta.name)}</div>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-size:10px; font-weight:500; padding:2px 7px; border-radius:5px; background:${pri.bg}; color:${pri.color};">${pri.label}</span>
+              <span style="font-size:11px; color:${stat.color}; font-weight:500;">${stat.label}</span>
+            </div>
+          </div>
+          <div style="text-align:right; flex-shrink:0;">
+            <div style="font-size:22px; font-weight:500; color:${scoreCol}; line-height:1;">${g.status === 'no_data' ? '—' : g.score + '%'}</div>
+            <div style="font-size:13px; color:${trendCol}; font-weight:500;">${trend}</div>
+          </div>
+        </div>
+        ${g.status !== 'no_data' ? `
+          <div class="progress-track" style="margin-bottom:8px;">
+            <div class="progress-fill" style="width:${g.score}%; background:${scoreCol};"></div>
+          </div>` : ''}
+        <div style="font-size:12px; color:var(--text3); line-height:1.6; font-style:italic;">"${escapeHtml(g.insight)}"</div>
+      </div>`;
+  }).join('');
+
+  container.innerHTML = `
+    <!-- Header summary -->
+    <div class="card" style="margin-bottom:10px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+        <div>
+          <p style="font-size:10px; font-weight:500; text-transform:uppercase; letter-spacing:.08em; color:var(--text3); margin-bottom:4px;">Overall score — 2026 goals</p>
+          <div style="font-size:36px; font-weight:500; color:${scoreColor}; line-height:1;">${overall_score}<span style="font-size:16px; color:var(--text4);">%</span></div>
+        </div>
+        <div style="text-align:right;">
+          <div class="stat-grid-3" style="gap:8px; margin-bottom:8px;">
+            <div class="stat-box"><div class="stat-box-value g">${onTrack}</div><div class="stat-box-label">On track</div></div>
+            <div class="stat-box"><div class="stat-box-value ${atRisk > 0 ? 'a' : 'dim'}">${atRisk}</div><div class="stat-box-label">At risk</div></div>
+            <div class="stat-box"><div class="stat-box-value dim">${noData}</div><div class="stat-box-label">No data</div></div>
+          </div>
+          <button class="btn-secondary" onclick="triggerGoalsAnalysis(true)" style="font-size:11px; padding:5px 12px;">🔄 Refresh analysis</button>
+        </div>
+      </div>
+      <div style="background:var(--purple-bg); border-left:2px solid var(--purple); border-radius:0 8px 8px 0; padding:10px 14px; margin-bottom:10px;">
+        <p style="font-size:11px; font-weight:500; color:var(--text4); text-transform:uppercase; letter-spacing:.06em; margin-bottom:4px;">Weekly summary</p>
+        <p style="font-size:12px; color:var(--purple-light); line-height:1.7; font-style:italic;">${escapeHtml(weekly_summary)}</p>
+      </div>
+      <div style="background:var(--amber-bg); border:0.5px solid var(--amber-border); border-radius:8px; padding:10px 14px;">
+        <p style="font-size:11px; font-weight:500; color:var(--text4); text-transform:uppercase; letter-spacing:.06em; margin-bottom:4px;">Top priority this week</p>
+        <p style="font-size:13px; color:var(--amber); font-weight:500;">${escapeHtml(top_priority)}</p>
+      </div>
+      <p style="font-size:10px; color:var(--text4); margin-top:10px; text-align:right;">${cachedLabel}</p>
+    </div>
+
+    <!-- Individual goal cards -->
+    ${goalCards}
+  `;
 }
 
 // ============================================
