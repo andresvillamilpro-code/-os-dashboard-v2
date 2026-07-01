@@ -367,7 +367,7 @@ function attachChecklistHandlers(table, idPrefix) {
       if (existing) {
         await sb.from(table).update({ completed }).eq('id', existing.id);
       } else {
-        await sb.from(table).insert({ log_date: today, item_name: itemName, completed });
+        await sb.from(table).insert({ log_date: today, item_name: itemName, completed, user_id: (await sb.auth.getUser()).data.user?.id });
       }
     });
   });
@@ -418,7 +418,7 @@ function attachTopGoalsHandlers() {
     if (existing) {
       await sb.from('top_goals').update(fields).eq('id', existing.id);
     } else {
-      await sb.from('top_goals').insert({ log_date: today, slot, ...fields });
+      await sb.from('top_goals').insert({ log_date: today, slot, ...fields, user_id: (await sb.auth.getUser()).data.user?.id });
     }
   }
 
@@ -444,56 +444,121 @@ function attachTopGoalsHandlers() {
 // ---------- Task list ----------
 
 async function loadTasks() {
+  const today = todayISO();
   const weekStart = isoDate(getMondayOfWeek());
-  // Load active tasks (all time) + tasks completed this week
-  const [activeRes, completedRes] = await Promise.all([
+
+  const [activeRes, todayDoneRes, weekDoneRes] = await Promise.all([
     sb.from('tasks').select('*').eq('status', 'active').order('date_created', { ascending: true }),
-    sb.from('tasks').select('*').eq('status', 'done').gte('date_completed', weekStart).order('date_completed', { ascending: true })
+    sb.from('tasks').select('*').eq('status', 'done').eq('date_completed', today).order('date_completed', { ascending: true }),
+    sb.from('tasks').select('*').eq('status', 'done').gte('date_completed', weekStart).lt('date_completed', today).order('date_completed', { ascending: true })
   ]);
+
   return {
     active: activeRes.data || [],
-    completed: completedRes.data || []
+    completedToday: todayDoneRes.data || [],
+    completedWeek: weekDoneRes.data || []
   };
 }
 
 function renderTaskListCard(tasks) {
-  const { active, completed } = tasks;
-  const totalThisWeek = completed.length;
-  const completedRows = completed.map(t => `
-    <div class="check-row" data-task-id="${t.id}">
-      <input type="checkbox" checked data-task-check="${t.id}" />
-      <label class="check-label" style="text-decoration:line-through; color:var(--text4);">${escapeHtml(t.text)}</label>
-      <span style="font-size:10px; color:var(--text4); margin-left:auto; white-space:nowrap;">${t.date_completed || ''}</span>
-    </div>`).join('');
+  const { active, completedToday, completedWeek } = tasks;
+  const totalWeek = completedToday.length + completedWeek.length;
 
+  const deleteBtn = (id) =>
+    `<span data-task-delete="${id}" style="font-size:11px;color:var(--text4);cursor:pointer;padding:2px 6px;border-radius:4px;border:0.5px solid var(--border2);flex-shrink:0;">✕</span>`;
+
+  // Active tasks
   const activeRows = active.map(t => `
     <div class="check-row" data-task-id="${t.id}">
       <input type="checkbox" data-task-check="${t.id}" />
-      <label class="check-label">${escapeHtml(t.text)}</label>
+      <label class="check-label" style="flex:1;">${escapeHtml(t.text)}</label>
+      ${deleteBtn(t.id)}
     </div>`).join('');
+
+  // Completed today (visible by default)
+  const todayRows = completedToday.map(t => `
+    <div class="check-row" data-task-id="${t.id}">
+      <input type="checkbox" checked data-task-check="${t.id}" />
+      <label class="check-label" style="text-decoration:line-through;color:var(--text4);flex:1;">${escapeHtml(t.text)}</label>
+      ${deleteBtn(t.id)}
+    </div>`).join('');
+
+  // This week — grouped by day, collapsible
+  const DOW_FULL = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const byDay = {};
+  completedWeek.forEach(t => {
+    const d = t.date_completed || '';
+    if (!byDay[d]) byDay[d] = [];
+    byDay[d].push(t);
+  });
+  const weekRows = Object.entries(byDay).sort().map(([date, dayTasks]) => {
+    const dow = DOW_FULL[new Date(date + 'T12:00:00').getDay()];
+    const rows = dayTasks.map(t => `
+      <div class="check-row" data-task-id="${t.id}" style="padding-left:10px;">
+        <input type="checkbox" checked data-task-check="${t.id}" />
+        <label class="check-label" style="text-decoration:line-through;color:var(--text4);flex:1;">${escapeHtml(t.text)}</label>
+        ${deleteBtn(t.id)}
+      </div>`).join('');
+    return `<div style="font-size:10px;font-weight:500;color:var(--text4);text-transform:uppercase;letter-spacing:.06em;padding:6px 0 2px;">${dow}</div>${rows}`;
+  }).join('');
+
+  const todaySection = completedToday.length ? `
+    <div style="border-top:0.5px solid var(--border2);margin:6px 0 4px;"></div>
+    <div style="font-size:10px;font-weight:500;color:var(--text4);text-transform:uppercase;letter-spacing:.06em;padding:2px 0 6px;">Completed today</div>
+    ${todayRows}` : '';
+
+  const weekSection = completedWeek.length ? `
+    <div style="border-top:0.5px solid var(--border2);margin:6px 0;"></div>
+    <div onclick="toggleWeekTasks()" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;padding:2px 0;">
+      <span style="font-size:11px;font-weight:500;color:var(--text3);">This week</span>
+      <span style="display:flex;align-items:center;gap:6px;">
+        <span style="font-size:11px;background:var(--green-bg);color:var(--green);border:0.5px solid var(--green-border);border-radius:10px;padding:1px 8px;font-weight:500;">${completedWeek.length}</span>
+        <span id="week-tasks-arrow" style="font-size:10px;color:var(--text4);">▶</span>
+      </span>
+    </div>
+    <div id="week-tasks-list" style="display:none;margin-top:4px;">${weekRows}</div>` : '';
+
+  const empty = !active.length && !completedToday.length && !completedWeek.length;
 
   return `
     <div class="card">
       <div class="card-header">
         <p class="card-title" style="margin-bottom:0;">Task of the day</p>
-        ${totalThisWeek > 0 ? `<span class="card-meta">${totalThisWeek} done this week</span>` : ''}
+        ${totalWeek > 0 ? `<span class="card-meta">${totalWeek} done this week</span>` : ''}
       </div>
       <div id="task-list">
-        ${activeRows || ''}
-        ${completedRows ? `<div style="border-top:0.5px solid var(--border2); margin:6px 0;"></div>${completedRows}` : ''}
-        ${!active.length && !completed.length ? '<p class="empty-state">No tasks yet — add one below.</p>' : ''}
+        ${empty ? '<p class="empty-state" style="padding:8px 0;">No tasks yet — add one below.</p>' : activeRows}
+        ${todaySection}
+        ${weekSection}
       </div>
-      <form id="add-task-form" style="display:flex; gap:8px; margin-top:10px;">
+      <form id="add-task-form" style="display:flex;gap:8px;margin-top:10px;">
         <input type="text" id="new-task-input" placeholder="Add a task..." style="flex:1;" />
         <button type="submit" class="btn-secondary">Add</button>
       </form>
     </div>`;
 }
 
+function toggleWeekTasks() {
+  const list = document.getElementById('week-tasks-list');
+  const arrow = document.getElementById('week-tasks-arrow');
+  if (!list) return;
+  const isOpen = list.style.display !== 'none';
+  list.style.display = isOpen ? 'none' : 'block';
+  if (arrow) arrow.textContent = isOpen ? '▶' : '▼';
+}
+
 function attachTaskListHandlers() {
   const list = document.getElementById('task-list');
   const form = document.getElementById('add-task-form');
   if (!list || !form) return;
+
+  list.querySelectorAll('[data-task-delete]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      const id = e.target.dataset.taskDelete;
+      await sb.from('tasks').delete().eq('id', id);
+      renderDailyTab();
+    });
+  });
 
   list.querySelectorAll('input[data-task-check]').forEach(cb => {
     cb.addEventListener('change', async (e) => {
@@ -514,7 +579,7 @@ function attachTaskListHandlers() {
     const input = document.getElementById('new-task-input');
     const text = input.value.trim();
     if (!text) return;
-    await sb.from('tasks').insert({ text, status: 'active', date_created: todayISO() });
+    await sb.from('tasks').insert({ text, status: 'active', date_created: todayISO(), user_id: (await sb.auth.getUser()).data.user?.id });
     input.value = '';
     renderDailyTab();
   });
