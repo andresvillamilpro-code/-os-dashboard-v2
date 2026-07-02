@@ -1751,7 +1751,24 @@ async function renderFitnessTab() {
       ${renderCardioGrid(cardioMap, thisWeekDates)}
     </div>
 
-    <!-- Daily fitness session log (between cardio and strength) -->
+    <!-- Supplements (synced with Daily tab) -->
+    <div class="card">
+      <div class="card-header">
+        <p class="card-title" style="margin-bottom:0;">Supplements — today</p>
+        <span class="card-meta">Synced with Daily tab</span>
+      </div>
+      <div id="fitness-supplements-list">
+        ${SUPPLEMENT_ITEMS.map((item) => {
+          const idx = CONSISTENCY_ITEMS.indexOf(item);
+          return `<div class="check-row">
+            <input type="checkbox" data-idx="${idx}" ${suppMap[item] ? 'checked' : ''} />
+            <label class="check-label">${escapeHtml(item)}</label>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+
+    <!-- Daily fitness session log -->
     <div class="card">
       <div class="card-header">
         <p class="card-title" style="margin-bottom:0;">Log today's session</p>
@@ -1796,23 +1813,6 @@ async function renderFitnessTab() {
       <div class="card">
         <p class="card-title">Weight &amp; sleep</p>
         ${renderWeightSleepCard(currentWeight, sleepMap, thisWeekDates)}
-      </div>
-    </div>
-
-    <!-- Supplements (synced with Daily tab) -->
-    <div class="card">
-      <div class="card-header">
-        <p class="card-title" style="margin-bottom:0;">Supplements — today</p>
-        <span class="card-meta">Synced with Daily tab</span>
-      </div>
-      <div id="fitness-supplements-list">
-        ${SUPPLEMENT_ITEMS.map((item) => {
-          const idx = CONSISTENCY_ITEMS.indexOf(item);
-          return `<div class="check-row">
-            <input type="checkbox" data-idx="${idx}" ${suppMap[item] ? 'checked' : ''} />
-            <label class="check-label">${escapeHtml(item)}</label>
-          </div>`;
-        }).join('')}
       </div>
     </div>
 
