@@ -2597,20 +2597,143 @@ const FAMILY_METRICS = [
   { label: 'Intentional Family Time', table: 'consistency_log', item: 'Family time', cadence: 'daily', weight: 1 },
 ];
 
+// ============================================
+// GOAL #3 — "Build an Elite Discipline System"
+// This is the meta-goal: it rolls up the discipline signal already being
+// captured elsewhere in the app (trading sessions, fitness sessions) plus
+// the general daily-checklist adherence (morning routine + the systems
+// items in Consistency check — excluding Family Time / Service, which
+// belong to the Faith/Family goals instead).
+// ============================================
+
+// Numeric session score (e.g. trading_sessions.discipline_score, 0-100),
+// averaged over the last 7 / 30 days among days that actually have a
+// session logged (no session ≠ automatic zero — the checklist metrics
+// below already cover raw daily consistency).
+async function calcSessionScoreStats(table, dateField, scoreField, { scale = 1 } = {}) {
+  const todayStr = todayISO();
+  const start30 = addDaysISO(todayStr, -29);
+  const start14 = addDaysISO(todayStr, -13);
+  const start7 = addDaysISO(todayStr, -6);
+
+  const { data } = await sb
+    .from(table)
+    .select(`${dateField}, ${scoreField}`)
+    .gte(dateField, start30)
+    .lte(dateField, todayStr);
+
+  const rows = data || [];
+  const hasAnyData = rows.length > 0;
+  const scoreOf = r => (r[scoreField] || 0) * scale;
+
+  const last7Rows = rows.filter(r => r[dateField] >= start7);
+  const prev7Rows = rows.filter(r => r[dateField] >= start14 && r[dateField] < start7);
+  const avg = (list) => list.length ? list.reduce((s, r) => s + scoreOf(r), 0) / list.length : null;
+
+  const last30Avg = avg(rows);
+  const last7Avg = avg(last7Rows);
+  const prev7Avg = avg(prev7Rows);
+
+  const blendedLast7 = last7Avg != null ? last7Avg : (last30Avg || 0);
+  const score = hasAnyData ? Math.round(0.6 * blendedLast7 + 0.4 * (last30Avg || 0)) : 0;
+
+  let trend = 'stable';
+  if (last7Avg != null && prev7Avg != null) {
+    if (last7Avg > prev7Avg + 5) trend = 'up';
+    else if (last7Avg < prev7Avg - 5) trend = 'down';
+  }
+
+  return { hasAnyData, score, sessionCount: rows.length };
+}
+
+// Average completion rate across a GROUP of checklist items (e.g. the full
+// morning routine) rather than a single item — a day counts partially if
+// only some of the items were checked.
+async function calcChecklistGroupStats(table, itemNames) {
+  const todayStr = todayISO();
+  const startStr = addDaysISO(todayStr, -29);
+
+  const { data } = await sb
+    .from(table)
+    .select('log_date, item_name, completed')
+    .in('item_name', itemNames)
+    .gte('log_date', startStr)
+    .lte('log_date', todayStr);
+
+  const byDate = {};
+  (data || []).forEach(row => {
+    if (!byDate[row.log_date]) byDate[row.log_date] = {};
+    byDate[row.log_date][row.item_name] = !!row.completed;
+  });
+  const hasAnyData = Object.keys(byDate).length > 0;
+
+  const days = [];
+  for (let i = 29; i >= 0; i--) days.push(addDaysISO(todayStr, -i));
+
+  const dayRate = (d) => {
+    const entry = byDate[d];
+    if (!entry) return 0;
+    return itemNames.filter(n => entry[n]).length / itemNames.length;
+  };
+  const avg = (list) => list.reduce((s, d) => s + dayRate(d), 0) / list.length;
+
+  const last30Rate = avg(days);
+  const last7Rate = avg(days.slice(-7));
+
+  const score = hasAnyData ? Math.round((0.6 * last7Rate + 0.4 * last30Rate) * 100) : 0;
+  return { hasAnyData, score };
+}
+
+const CONSISTENCY_SYSTEM_ITEMS = CONSISTENCY_ITEMS.filter(
+  i => i !== 'Family time' && i !== 'Served or encouraged someone'
+);
+
+async function computeDisciplineSystemGoal() {
+  const [trading, fitness, morning, systems] = await Promise.all([
+    calcSessionScoreStats('trading_sessions', 'session_date', 'discipline_score', { scale: 1 }),
+    calcSessionScoreStats('fitness_daily_session', 'session_date', 'discipline_score', { scale: 1.25 }), // raw is out of 80
+    calcChecklistGroupStats('morning_routine_log', MORNING_ROUTINE_ITEMS),
+    calcChecklistGroupStats('consistency_log', CONSISTENCY_SYSTEM_ITEMS),
+  ]);
+
+  const metrics = [
+    { label: 'Trading discipline', weight: 0.35, stats: trading, extra: trading.hasAnyData ? ` (${trading.sessionCount} sessions)` : '' },
+    { label: 'Fitness discipline', weight: 0.35, stats: fitness, extra: fitness.hasAnyData ? ` (${fitness.sessionCount} sessions)` : '' },
+    { label: 'Morning routine', weight: 0.15, stats: morning, extra: '' },
+    { label: 'Daily systems', weight: 0.15, stats: systems, extra: '' },
+  ];
+
+  const active = metrics.filter(m => m.stats.hasAnyData);
+  if (active.length === 0) {
+    return { id: 3, score: 0, trend: 'no_data', status: 'no_data', insight: 'No discipline data logged yet — trading sessions, fitness sessions, and daily checklists all feed this score.' };
+  }
+
+  const weightSum = active.reduce((s, m) => s + m.weight, 0);
+  const score = Math.round(active.reduce((s, m) => s + m.stats.score * (m.weight / weightSum), 0));
+
+  const insight = metrics
+    .map(m => m.stats.hasAnyData ? `${m.label}: ${m.stats.score}%${m.extra}` : `${m.label}: no data`)
+    .join(' · ');
+
+  return { id: 3, score, trend: 'stable', status: habitStatusFromScore(score, true), insight };
+}
+
 async function computeHabitGoal(goalId) {
+  if (goalId === 3) return computeDisciplineSystemGoal();
   if (goalId === 5) return computeCompositeGoal(5, FAITH_METRICS);
   if (goalId === 8) return computeCompositeGoal(8, FAMILY_METRICS);
   return null;
 }
 
-// Merges the deterministic Faith/Family scores into an analysis object,
-// overwriting whatever the AI guessed (or filling the slot if it's missing),
-// then recomputes the overall score so the header stays consistent.
+// Merges the deterministic Discipline/Faith/Family scores into an analysis
+// object, overwriting whatever the AI guessed (or filling the slot if it's
+// missing), then recomputes the overall score so the header stays
+// consistent.
 async function mergeHabitGoalsIntoAnalysis(analysis) {
   const base = analysis || {};
   const goals = Array.isArray(base.goals) ? [...base.goals] : [];
 
-  const ids = [5, 8];
+  const ids = [3, 5, 8];
   const computed = await Promise.all(ids.map(computeHabitGoal));
   computed.forEach(g => {
     if (!g) return;
