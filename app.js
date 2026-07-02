@@ -881,7 +881,7 @@ async function saveTradingSettings(fields) {
   if (existing?.[0]) {
     await sb.from('trading_settings').update(fields).eq('id', existing[0].id);
   } else {
-    await sb.from('trading_settings').insert(fields);
+    await sb.from('trading_settings').insert({ ...fields, user_id: (await sb.auth.getUser()).data.user?.id });
   }
 }
 
@@ -1924,7 +1924,7 @@ function attachMuscleGridHandlers(weekStart) {
       if (existing) {
         await sb.from('fitness_muscle_log').update({ trained }).eq('id', existing.id);
       } else {
-        await sb.from('fitness_muscle_log').insert({ week_start: weekStart, muscle_group: muscle, day_date, trained, user_id: (await sb.auth.getUser()).data.user.id });
+        await sb.from('fitness_muscle_log').insert({ week_start: weekStart, muscle_group: muscle, day_date, trained, user_id: (await sb.auth.getUser()).data.user?.id });
       }
     });
   });
