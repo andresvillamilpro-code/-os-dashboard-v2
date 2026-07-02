@@ -1651,7 +1651,9 @@ async function renderFitnessTab() {
     sleepRows,
     weightThis,
     supplementsToday,
-    photoRows
+    photoRows,
+    todaySessionArr,
+    weekDataArr
   ] = await Promise.all([
     safeQuery(sb.from('fitness_muscle_log').select('*').eq('week_start', thisWeek)),
     safeQuery(sb.from('fitness_cardio_log').select('*').eq('week_start', thisWeek)),
@@ -1659,8 +1661,15 @@ async function renderFitnessTab() {
     safeQuery(sb.from('fitness_sleep_log').select('*').gte('log_date', thisWeek).lte('log_date', thisWeekDates[6])),
     safeQuery(sb.from('fitness_weight_log').select('*').eq('week_start', thisWeek).limit(1)),
     safeQuery(sb.from('consistency_log').select('*').eq('log_date', today)),
-    safeQuery(sb.from('fitness_photos').select('*').eq('week_start', thisWeek))
+    safeQuery(sb.from('fitness_photos').select('*').eq('week_start', thisWeek)),
+    safeQuery(sb.from('fitness_daily_session').select('*').eq('session_date', today).limit(1)),
+    safeQuery(sb.from('fitness_weight_log').select('progressive_overload,cheat_days').eq('week_start', thisWeek).limit(1))
   ]);
+
+  const todayFitnessSession = todaySessionArr[0] || null;
+  const weekData = weekDataArr[0] || {};
+  const progressiveOverload = weekData.progressive_overload || false;
+  const cheatDays = weekData.cheat_days || 0;
 
   // ── This week live stats (always reflect current state) ──
   const thisTrainingDays = new Set(muscleThis.filter(r => r.trained).map(r => r.day_date));
@@ -1742,6 +1751,42 @@ async function renderFitnessTab() {
       ${renderCardioGrid(cardioMap, thisWeekDates)}
     </div>
 
+    <!-- Daily fitness session log (between cardio and strength) -->
+    <div class="card">
+      <div class="card-header">
+        <p class="card-title" style="margin-bottom:0;">Log today's session</p>
+        ${todayFitnessSession ? `<span style="font-size:11px;font-weight:500;color:var(--green);">✅ Logged — ${Math.round((todayFitnessSession.discipline_score||0)/80*100)}%</span>` : '<span class="card-meta">Not logged yet</span>'}
+      </div>
+      <form id="fitness-session-form">
+        ${[
+          { key: 'workout_done',   label: 'Workout completed as planned', weight: 25 },
+          { key: 'protein_done',   label: 'Protein target reached',       weight: 20 },
+          { key: 'nutrition_done', label: 'Nutrition followed',            weight: 20 },
+          { key: 'sleep_done',     label: '7h+ sleep',                    weight: 15 },
+        ].map(f => `
+          <div class="check-row">
+            <input type="checkbox" name="${f.key}" ${todayFitnessSession?.[f.key] ? 'checked' : ''} />
+            <label class="check-label" style="flex:1;">${f.label}</label>
+            <span style="font-size:10px;color:var(--text4);">${f.weight}%</span>
+          </div>`).join('')}
+        <div style="padding-top:12px;margin-top:4px;border-top:0.5px solid var(--border2);">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span style="font-size:12px;color:var(--text2);min-width:120px;">Energy level</span>
+            <div style="display:flex;gap:4px;" id="fitness-rating-energy_rating">
+              ${[1,2,3,4,5].map(n => `
+                <div onclick="setFitnessRating('energy_rating',${n})" data-val="${n}"
+                  style="width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;cursor:pointer;border:0.5px solid ${(todayFitnessSession?.energy_rating||0)>=n?'var(--green-border)':'var(--border2)'};background:${(todayFitnessSession?.energy_rating||0)>=n?'var(--green-bg)':'var(--bg3)'};color:${(todayFitnessSession?.energy_rating||0)>=n?'var(--green)':'var(--text4)'};">★</div>`).join('')}
+            </div>
+            <input type="hidden" name="energy_rating" value="${todayFitnessSession?.energy_rating || 0}" />
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;">
+          <div id="fitness-score-preview" style="font-size:13px;color:var(--text3);">Score: —</div>
+          <button type="submit" class="btn-secondary">Save session</button>
+        </div>
+      </form>
+    </div>
+
     <!-- Strength + Weight & Sleep -->
     <div class="two-col">
       <div class="card">
@@ -1768,6 +1813,24 @@ async function renderFitnessTab() {
             <label class="check-label">${escapeHtml(item)}</label>
           </div>`;
         }).join('')}
+      </div>
+    </div>
+
+    <!-- Weekly check (progressive overload + cheat days) -->
+    <div class="card">
+      <p class="card-title">Weekly check</p>
+      <div class="check-row">
+        <input type="checkbox" id="progressive-overload-check" ${progressiveOverload ? 'checked' : ''} />
+        <label class="check-label" style="flex:1;">Progressive overload achieved this week</label>
+        <span style="font-size:10px;color:var(--text4);">+20% to weekly score</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-top:0.5px solid var(--border2);margin-top:4px;">
+        <span class="check-label" style="flex:1;">Cheat days this week</span>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button onclick="adjustCheatDays(-1)" style="width:28px;height:28px;border-radius:6px;border:0.5px solid var(--border);background:var(--bg3);color:var(--text2);font-size:16px;cursor:pointer;">−</button>
+          <span id="cheat-days-display" style="font-size:14px;font-weight:500;color:var(--text);min-width:20px;text-align:center;">${cheatDays}</span>
+          <button onclick="adjustCheatDays(1)" style="width:28px;height:28px;border-radius:6px;border:0.5px solid var(--border);background:var(--bg3);color:var(--text2);font-size:16px;cursor:pointer;">+</button>
+        </div>
       </div>
     </div>
 
@@ -1803,8 +1866,10 @@ async function renderFitnessTab() {
   attachWeightSleepHandlers(thisWeek, thisWeekDates);
   attachChecklistHandlers('consistency_log', 'fitness-supplements');
   attachPhotoHandlers(thisWeek);
+  attachFitnessSessionHandlers(thisWeek, weekData);
+  updateFitnessScorePreview();
 
-  // Load discipline section async
+  // Load KPI stats section async
   loadAndRenderFitnessDiscipline(thisWeek);
 }
 
@@ -2098,48 +2163,39 @@ async function loadAndRenderFitnessDiscipline(thisWeek) {
   const el = document.getElementById('fitness-discipline-section');
   if (!el) return;
 
-  const today = todayISO();
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
   const thirtyDaysAgoISO = thirtyDaysAgo.toISOString().split('T')[0];
 
-  const [sessionsRes, weekDataRes] = await Promise.all([
-    safeQuery(sb.from('fitness_daily_session').select('*').order('session_date', { ascending: false }).limit(60)),
-    safeQuery(sb.from('fitness_weight_log').select('*').eq('week_start', thisWeek).limit(1))
-  ]);
+  const sessions = await safeQuery(
+    sb.from('fitness_daily_session').select('*').order('session_date', { ascending: false }).limit(60)
+  );
 
-  const sessions = sessionsRes;
-  const weekData = weekDataRes[0] || {};
-  const todaySession = sessions.find(s => s.session_date === today) || null;
-
-  // Stats
   const last30Sessions = sessions.filter(s => s.session_date >= thirtyDaysAgoISO);
   const avgDailyRaw = last30Sessions.length
     ? last30Sessions.reduce((s, r) => s + (r.discipline_score || 0), 0) / last30Sessions.length
     : 0;
 
-  const progressiveOverload = weekData.progressive_overload || false;
-  const cheatDays = weekData.cheat_days || 0;
+  const weekData = await safeQuery(
+    sb.from('fitness_weight_log').select('progressive_overload').eq('week_start', thisWeek).limit(1)
+  );
+  const progressiveOverload = weekData[0]?.progressive_overload || false;
   const weeklyScore = calcFitnessWeeklyScore(avgDailyRaw, progressiveOverload);
 
-  // Category compliance last 30 days
   const compliance = (key) => last30Sessions.length
     ? Math.round(last30Sessions.filter(s => s[key]).length / last30Sessions.length * 100)
     : 0;
-
   const scoreColor = (s) => s >= 80 ? 'var(--green)' : s >= 60 ? 'var(--amber)' : s > 0 ? 'var(--red)' : 'var(--text4)';
   const avgEnergy = last30Sessions.filter(s => s.energy_rating).length
     ? (last30Sessions.reduce((s, r) => s + (r.energy_rating || 0), 0) / last30Sessions.filter(s => s.energy_rating).length).toFixed(1)
     : '—';
 
   el.innerHTML = `
-    <!-- Section divider -->
     <div style="display:flex;align-items:center;gap:10px;margin:4px 0 10px;">
       <div style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.08em;color:var(--text4);">Fitness discipline &amp; performance</div>
       <div style="flex:1;height:0.5px;background:var(--border2);"></div>
     </div>
 
-    <!-- KPI cards -->
     <div class="stat-grid-3" style="margin-bottom:10px;">
       <div class="card stat-box">
         <div class="stat-box-value" style="color:${scoreColor(weeklyScore)};">${sessions.length ? weeklyScore + '%' : '—'}</div>
@@ -2147,7 +2203,7 @@ async function loadAndRenderFitnessDiscipline(thisWeek) {
         <div style="font-size:10px;color:var(--text4);margin-top:4px;">daily avg + overload</div>
       </div>
       <div class="card stat-box">
-        <div class="stat-box-value" style="color:${scoreColor(Math.round(avgDailyRaw / 80 * 100))};">${last30Sessions.length ? Math.round(avgDailyRaw / 80 * 100) + '%' : '—'}</div>
+        <div class="stat-box-value" style="color:${scoreColor(Math.round(avgDailyRaw/80*100))};">${last30Sessions.length ? Math.round(avgDailyRaw/80*100)+'%' : '—'}</div>
         <div class="stat-box-label">Daily discipline</div>
         <div style="font-size:10px;color:var(--text4);margin-top:4px;">avg last 30 days</div>
       </div>
@@ -2158,7 +2214,6 @@ async function loadAndRenderFitnessDiscipline(thisWeek) {
       </div>
     </div>
 
-    <!-- Compliance breakdown -->
     ${last30Sessions.length ? `
     <div class="card" style="margin-bottom:10px;">
       <p class="card-title">Daily compliance — last 30 days</p>
@@ -2179,74 +2234,17 @@ async function loadAndRenderFitnessDiscipline(thisWeek) {
           </div>
         </div>`;
       }).join('')}
-      <div style="padding-top:10px;border-top:0.5px solid var(--border2);display:flex;justify-content:space-between;align-items:center;">
+      <div style="padding-top:10px;border-top:0.5px solid var(--border2);display:flex;justify-content:space-between;">
         <span style="font-size:12px;color:var(--text3);">Average energy level</span>
         <span style="font-size:16px;font-weight:500;color:var(--text);">${avgEnergy} / 5</span>
       </div>
     </div>` : ''}
 
-    <!-- Today's daily session -->
-    <div class="card" style="margin-bottom:10px;">
-      <div class="card-header">
-        <p class="card-title" style="margin-bottom:0;">Log today's session</p>
-        ${todaySession ? `<span style="font-size:11px;font-weight:500;color:var(--green);">✅ Logged — score: ${Math.round((todaySession.discipline_score || 0) / 80 * 100)}%</span>` : '<span class="card-meta">Not logged yet</span>'}
-      </div>
-      <form id="fitness-session-form">
-        ${[
-          { key: 'workout_done',   label: 'Workout completed as planned', weight: 25 },
-          { key: 'protein_done',   label: 'Protein target reached',       weight: 20 },
-          { key: 'nutrition_done', label: 'Nutrition followed',            weight: 20 },
-          { key: 'sleep_done',     label: '7h+ sleep',                    weight: 15 },
-        ].map(f => `
-          <div class="check-row">
-            <input type="checkbox" name="${f.key}" ${todaySession?.[f.key] ? 'checked' : ''} />
-            <label class="check-label" style="flex:1;">${f.label}</label>
-            <span style="font-size:10px;color:var(--text4);">${f.weight}%</span>
-          </div>`).join('')}
-
-        <div style="padding-top:12px;margin-top:4px;border-top:0.5px solid var(--border2);">
-          <div style="display:flex;align-items:center;gap:10px;">
-            <span style="font-size:12px;color:var(--text2);min-width:120px;">Energy level</span>
-            <div style="display:flex;gap:4px;" id="fitness-rating-energy">
-              ${[1,2,3,4,5].map(n => `
-                <div onclick="setFitnessRating('energy_rating',${n})" data-val="${n}"
-                  style="width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;cursor:pointer;border:0.5px solid ${(todaySession?.energy_rating||0)>=n?'var(--green-border)':'var(--border2)'};background:${(todaySession?.energy_rating||0)>=n?'var(--green-bg)':'var(--bg3)'};color:${(todaySession?.energy_rating||0)>=n?'var(--green)':'var(--text4)'};">★</div>`).join('')}
-            </div>
-            <input type="hidden" name="energy_rating" value="${todaySession?.energy_rating || 0}" />
-          </div>
-        </div>
-
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;">
-          <div id="fitness-score-preview" style="font-size:13px;color:var(--text3);">Score: —</div>
-          <button type="submit" class="btn-secondary">Save session</button>
-        </div>
-      </form>
-    </div>
-
-    <!-- Weekly check -->
-    <div class="card">
-      <p class="card-title">Weekly check</p>
-      <div class="check-row">
-        <input type="checkbox" id="progressive-overload-check" ${progressiveOverload ? 'checked' : ''} />
-        <label class="check-label" style="flex:1;">Progressive overload achieved this week</label>
-        <span style="font-size:10px;color:var(--text4);">+20% to weekly score</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-top:0.5px solid var(--border2);margin-top:4px;">
-        <span class="check-label" style="flex:1;">Cheat days this week</span>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <button onclick="adjustCheatDays(-1)" style="width:28px;height:28px;border-radius:6px;border:0.5px solid var(--border);background:var(--bg3);color:var(--text2);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;">−</button>
-          <span id="cheat-days-display" style="font-size:14px;font-weight:500;color:var(--text);min-width:20px;text-align:center;">${cheatDays}</span>
-          <button onclick="adjustCheatDays(1)" style="width:28px;height:28px;border-radius:6px;border:0.5px solid var(--border);background:var(--bg3);color:var(--text2);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;">+</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Recent sessions -->
     ${sessions.length > 0 ? `
     <div class="card">
       <p class="card-title">Recent sessions</p>
       ${sessions.slice(0, 7).map(s => {
-        const pct = Math.round((s.discipline_score || 0) / 80 * 100);
+        const pct = Math.round((s.discipline_score||0)/80*100);
         const col = scoreColor(pct);
         return `<div class="check-row">
           <span class="check-label" style="color:var(--text4);min-width:90px;">${s.session_date}</span>
@@ -2258,9 +2256,6 @@ async function loadAndRenderFitnessDiscipline(thisWeek) {
       }).join('')}
     </div>` : ''}
   `;
-
-  attachFitnessSessionHandlers(thisWeek, weekData);
-  updateFitnessScorePreview();
 }
 
 function setFitnessRating(key, val) {
