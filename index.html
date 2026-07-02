@@ -153,6 +153,12 @@
       .stat-grid-3 { grid-template-columns: 1fr; }
       .settings-grid { grid-template-columns: repeat(2, 1fr); }
     }
+    /* ── TOPBAR SCROLL BEHAVIOUR ── */
+    .topbar { transition: padding .25s ease; }
+    .topbar.scrolled { padding: 8px 20px; }
+    .topbar-welcome { transition: max-height .25s ease, opacity .2s ease, padding .25s ease; overflow: hidden; max-height: 40px; opacity: 1; padding: 6px 0 4px; }
+    .topbar.scrolled .topbar-welcome { max-height: 0; opacity: 0; padding: 0; }
+
     .empty-state { text-align: center; padding: 20px 10px; color: var(--text4); font-size: 12px; }
     .loading-text { color: var(--text4); font-size: 13px; text-align: center; padding: 16px; }
 
@@ -196,7 +202,7 @@
   </div>
 
   <!-- Centered calligraphy welcome -->
-  <div style="text-align:center; padding:6px 0 4px; position:relative;">
+  <div class="topbar-welcome" style="text-align:center; position:relative;">
     <span style="font-family:'Palatino Linotype','Book Antiqua',Palatino,Georgia,serif; font-size:17px; font-style:italic; font-weight:400; color:var(--purple-light); letter-spacing:0.04em;">Welcome back, future Millionaire</span>
     <span style="font-size:14px; margin-left:6px;">👑</span>
   </div>
@@ -251,6 +257,12 @@
 
   // Apply saved theme on load
   applyTheme(localStorage.getItem('os_theme') || 'dark');
+
+  // Scroll-aware topbar
+  window.addEventListener('scroll', () => {
+    const topbar = document.querySelector('.topbar');
+    if (topbar) topbar.classList.toggle('scrolled', window.scrollY > 40);
+  }, { passive: true });
 
   // Live clock
   function updateClock() {
