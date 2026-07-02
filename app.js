@@ -54,8 +54,15 @@ const CONSISTENCY_ITEMS = [
   'Magnesium',
   'Gym',
   'Family time',
-  '20 pages reading'
+  '20 pages reading',
+  'Served or encouraged someone'
 ];
+
+// Display-only label overrides — the item_name stored in the DB stays
+// the same (so history/streaks keep working), only what's shown changes.
+const ITEM_DISPLAY_LABELS = {
+  'Family time': 'Intentional Family Time'
+};
 
 // ============================================
 // AUTH HELPERS
@@ -188,11 +195,13 @@ async function renderDailyTab() {
   if (!user) return;
 
   const today = todayISO();
+  const weekStart = isoDate(getMondayOfWeek());
 
-  const [snapshot, routine, consistency, goals, tasks] = await Promise.all([
+  const [snapshot, routine, consistency, weeklyChecks, goals, tasks] = await Promise.all([
     loadTradingSnapshot(),
     loadChecklist('morning_routine_log', MORNING_ROUTINE_ITEMS, today),
     loadChecklist('consistency_log', CONSISTENCY_ITEMS, today),
+    loadWeeklyChecklist('weekly_checks', WEEKLY_ITEMS, weekStart),
     loadTopGoals(today),
     loadTasks()
   ]);
@@ -206,11 +215,13 @@ async function renderDailyTab() {
       ${renderTaskListCard(tasks)}
     </div>
     ${renderChecklistCard('Consistency check', 'consistency', consistency)}
+    ${renderWeeklyChecklistCard('This week', 'weekly-checks', weeklyChecks)}
     ${renderTradingSnapshotBox(snapshot)}
   `;
 
   attachChecklistHandlers('morning_routine_log', 'morning-routine');
   attachChecklistHandlers('consistency_log', 'consistency');
+  attachWeeklyChecklistHandlers('weekly_checks', 'weekly-checks');
   attachTopGoalsHandlers();
   attachTaskListHandlers();
   initGoogleCalendar();
@@ -330,6 +341,66 @@ async function loadChecklist(table, items, date) {
   }));
 }
 
+// ---------- Generic WEEKLY checklist (e.g. Church attendance) ----------
+// Same shape as the daily checklist above, but keyed by week_start (Monday)
+// instead of log_date, stored in its own `weekly_checks` table.
+
+const WEEKLY_ITEMS = ['Attended church this week'];
+
+async function loadWeeklyChecklist(table, items, weekStart) {
+  const { data } = await sb.from(table).select('*').eq('week_start', weekStart);
+  const byName = {};
+  (data || []).forEach(row => { byName[row.item_name] = row; });
+  return items.map(name => ({
+    item_name: name,
+    completed: byName[name]?.completed || false,
+    id: byName[name]?.id || null
+  }));
+}
+
+function renderWeeklyChecklistCard(title, idPrefix, rows) {
+  return `
+    <div class="card">
+      <p class="card-title">${title}</p>
+      <div id="${idPrefix}-list">
+        ${rows.map((r, i) => `
+          <div class="check-row">
+            <input type="checkbox" data-idx="${i}" ${r.completed ? 'checked' : ''} />
+            <label class="check-label">${escapeHtml(ITEM_DISPLAY_LABELS[r.item_name] || r.item_name)}</label>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function attachWeeklyChecklistHandlers(table, idPrefix) {
+  const items = WEEKLY_ITEMS;
+  const list = document.getElementById(`${idPrefix}-list`);
+  if (!list) return;
+  const weekStart = isoDate(getMondayOfWeek());
+  list.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', async (e) => {
+      const idx = Number(e.target.dataset.idx);
+      const itemName = items[idx];
+      const completed = e.target.checked;
+
+      const { data: existing } = await sb
+        .from(table)
+        .select('id')
+        .eq('week_start', weekStart)
+        .eq('item_name', itemName)
+        .maybeSingle();
+
+      if (existing) {
+        await sb.from(table).update({ completed }).eq('id', existing.id);
+      } else {
+        await sb.from(table).insert({ week_start: weekStart, item_name: itemName, completed, user_id: (await sb.auth.getUser()).data.user?.id });
+      }
+    });
+  });
+}
+
 function renderChecklistCard(title, idPrefix, rows) {
   return `
     <div class="card">
@@ -338,7 +409,7 @@ function renderChecklistCard(title, idPrefix, rows) {
         ${rows.map((r, i) => `
           <div class="check-row">
             <input type="checkbox" data-idx="${i}" ${r.completed ? 'checked' : ''} />
-            <label class="check-label">${escapeHtml(r.item_name)}</label>
+            <label class="check-label">${escapeHtml(ITEM_DISPLAY_LABELS[r.item_name] || r.item_name)}</label>
           </div>
         `).join('')}
       </div>
@@ -2374,6 +2445,188 @@ const STATUS_STYLE = {
 
 const TREND_ICON = { up: '↑', down: '↓', stable: '→', no_data: '—' };
 
+// ============================================
+// HABIT-BASED GOAL TRACKING — Faith (#5) & Family (#8)
+// Deterministic, computed client-side straight from the existing
+// checklist tables. No AI / Edge Function involved for these two —
+// they're real logged data, not an estimate.
+// ============================================
+
+function addDaysISO(dateStr, delta) {
+  const d = new Date(dateStr + 'T00:00:00');
+  d.setDate(d.getDate() + delta);
+  return isoDate(d);
+}
+
+// Daily-cadence metric (e.g. Prayer, Family Time, Service).
+// `capPerWeek`, if set, means the metric hits 100% once it's done that many
+// times in a 7-day window — e.g. Service only needs 3/7 for a full score,
+// it doesn't need to be daily.
+async function calcDailyMetricStats(table, itemName, { capPerWeek = null } = {}) {
+  const todayStr = todayISO();
+  const startStr = addDaysISO(todayStr, -29); // 30-day window incl. today
+
+  const { data } = await sb
+    .from(table)
+    .select('log_date, completed')
+    .eq('item_name', itemName)
+    .gte('log_date', startStr)
+    .lte('log_date', todayStr);
+
+  const byDate = {};
+  (data || []).forEach(row => { byDate[row.log_date] = !!row.completed; });
+  const hasAnyData = Object.keys(byDate).length > 0;
+
+  const days = [];
+  for (let i = 29; i >= 0; i--) days.push(addDaysISO(todayStr, -i));
+
+  const last7 = days.slice(-7);
+  const prev7 = days.slice(-14, -7);
+  const count = (list) => list.filter(d => byDate[d]).length;
+
+  // Raw rate (used for streak-style day counts in the insight text), and a
+  // "scored" rate that applies the weekly cap if one's set.
+  const last7Count = count(last7);
+  const last30Count = count(days);
+  const prev7Count = count(prev7);
+
+  const cap7 = capPerWeek || 7;
+  const cap30 = capPerWeek ? Math.round(capPerWeek * 30 / 7) : 30;
+
+  const last7Scored = Math.min(1, last7Count / cap7);
+  const last30Scored = Math.min(1, last30Count / cap30);
+  const prev7Scored = Math.min(1, prev7Count / cap7);
+
+  let streak = 0;
+  for (let i = days.length - 1; i >= 0; i--) {
+    if (byDate[days[i]]) streak++;
+    else break;
+  }
+
+  let trend = 'stable';
+  if (last7Scored > prev7Scored + 0.1) trend = 'up';
+  else if (last7Scored < prev7Scored - 0.1) trend = 'down';
+
+  const score = hasAnyData ? Math.round((0.6 * last7Scored + 0.4 * last30Scored) * 100) : 0;
+
+  return { hasAnyData, score, last7Count, last30Count, streak, trend };
+}
+
+// Weekly-cadence metric (e.g. Church attendance) — looks back N weeks
+// (including the current week) rather than N days.
+async function calcWeeklyMetricStats(table, itemName, weeksBack = 4) {
+  const weekStartStr = isoDate(getMondayOfWeek());
+  const earliestWeekStr = isoDate(getMondayOfWeek(new Date(new Date(weekStartStr).getTime() - (weeksBack - 1) * 7 * 86400000)));
+
+  const { data } = await sb
+    .from(table)
+    .select('week_start, completed')
+    .eq('item_name', itemName)
+    .gte('week_start', earliestWeekStr)
+    .lte('week_start', weekStartStr);
+
+  const byWeek = {};
+  (data || []).forEach(row => { byWeek[row.week_start] = !!row.completed; });
+  const hasAnyData = Object.keys(byWeek).length > 0;
+
+  const weeks = [];
+  for (let i = weeksBack - 1; i >= 0; i--) {
+    weeks.push(isoDate(getMondayOfWeek(new Date(new Date(weekStartStr).getTime() - i * 7 * 86400000))));
+  }
+
+  const attendedCount = weeks.filter(w => byWeek[w]).length;
+  const rate = attendedCount / weeks.length;
+  const score = hasAnyData ? Math.round(rate * 100) : 0;
+
+  const thisWeek = byWeek[weekStartStr];
+  const lastWeek = byWeek[weeks[weeks.length - 2]];
+  let trend = 'stable';
+  if (thisWeek && !lastWeek) trend = 'up';
+  else if (!thisWeek && lastWeek) trend = 'down';
+
+  return { hasAnyData, score, attendedCount, weeksBack, trend };
+}
+
+function habitStatusFromScore(score, hasAnyData) {
+  if (!hasAnyData) return 'no_data';
+  if (score >= 70) return 'on_track';
+  if (score >= 40) return 'at_risk';
+  return 'critical';
+}
+
+// A goal made of several weighted sub-metrics (some daily, some weekly).
+// Weights are renormalized across whichever metrics actually have data,
+// so a goal isn't penalized just because one input hasn't started logging.
+async function computeCompositeGoal(goalId, metrics) {
+  const results = await Promise.all(metrics.map(async m => {
+    const stats = m.cadence === 'weekly'
+      ? await calcWeeklyMetricStats(m.table, m.item, m.weeksBack || 4)
+      : await calcDailyMetricStats(m.table, m.item, { capPerWeek: m.capPerWeek });
+    return { ...m, stats };
+  }));
+
+  const active = results.filter(r => r.stats.hasAnyData);
+  if (active.length === 0) {
+    return { id: goalId, score: 0, trend: 'no_data', status: 'no_data', insight: `No data logged yet for ${metrics.map(m => m.label).join(', ')} — check the boxes and this will start tracking automatically.` };
+  }
+
+  const weightSum = active.reduce((s, r) => s + r.weight, 0);
+  const score = Math.round(active.reduce((s, r) => s + r.stats.score * (r.weight / weightSum), 0));
+
+  const ups = active.filter(r => r.stats.trend === 'up').length;
+  const downs = active.filter(r => r.stats.trend === 'down').length;
+  const trend = ups > downs ? 'up' : downs > ups ? 'down' : 'stable';
+
+  const parts = results.map(r => {
+    if (!r.stats.hasAnyData) return `${r.label}: no data`;
+    if (r.cadence === 'weekly') return `${r.label}: ${r.stats.attendedCount}/${r.stats.weeksBack} weeks`;
+    return `${r.label}: ${r.stats.last7Count}/7 this week`;
+  });
+  const insight = parts.join(' · ');
+
+  return { id: goalId, score, trend, status: habitStatusFromScore(score, true), insight };
+}
+
+const FAITH_METRICS = [
+  { label: 'Prayer & Bible', table: 'morning_routine_log', item: 'Pray and bible study', cadence: 'daily', weight: 0.5 },
+  { label: 'Service', table: 'consistency_log', item: 'Served or encouraged someone', cadence: 'daily', capPerWeek: 3, weight: 0.25 },
+  { label: 'Church', table: 'weekly_checks', item: 'Attended church this week', cadence: 'weekly', weight: 0.25 },
+];
+
+const FAMILY_METRICS = [
+  { label: 'Intentional Family Time', table: 'consistency_log', item: 'Family time', cadence: 'daily', weight: 1 },
+];
+
+async function computeHabitGoal(goalId) {
+  if (goalId === 5) return computeCompositeGoal(5, FAITH_METRICS);
+  if (goalId === 8) return computeCompositeGoal(8, FAMILY_METRICS);
+  return null;
+}
+
+// Merges the deterministic Faith/Family scores into an analysis object,
+// overwriting whatever the AI guessed (or filling the slot if it's missing),
+// then recomputes the overall score so the header stays consistent.
+async function mergeHabitGoalsIntoAnalysis(analysis) {
+  const base = analysis || {};
+  const goals = Array.isArray(base.goals) ? [...base.goals] : [];
+
+  const ids = [5, 8];
+  const computed = await Promise.all(ids.map(computeHabitGoal));
+  computed.forEach(g => {
+    if (!g) return;
+    const idx = goals.findIndex(x => x.id === g.id);
+    if (idx >= 0) goals[idx] = g;
+    else goals.push(g);
+  });
+
+  const scored = goals.filter(g => g.status !== 'no_data');
+  const overall_score = scored.length
+    ? Math.round(scored.reduce((s, g) => s + (g.score || 0), 0) / scored.length)
+    : 0;
+
+  return { ...base, goals, overall_score };
+}
+
 async function renderGoalsTab() {
   const container = document.getElementById('tab-content');
   container.innerHTML = '<p class="loading-text">Loading goals analysis...</p>';
@@ -2390,15 +2643,13 @@ async function renderGoalsTab() {
     .maybeSingle();
 
   if (cached?.analysis) {
-    renderGoalsUI(cached.analysis, cached.created_at, false);
+    const merged = await mergeHabitGoalsIntoAnalysis(cached.analysis);
+    renderGoalsUI(merged, cached.created_at, false);
   } else {
-    // No cache — trigger first analysis automatically
-    container.innerHTML = `
-      <div class="card" style="text-align:center; padding:24px;">
-        <p style="font-size:14px; font-weight:500; color:var(--text); margin-bottom:8px;">No analysis yet</p>
-        <p style="font-size:12px; color:var(--text4); margin-bottom:16px;">Claude will read all your data and score each goal. Takes about 5 seconds.</p>
-        <button class="btn-secondary" onclick="triggerGoalsAnalysis(false)">Run first analysis ↗</button>
-      </div>`;
+    // No AI analysis yet — Faith & Family don't need one, so show those
+    // live while prompting to run the rest.
+    const stub = await mergeHabitGoalsIntoAnalysis({ goals: [], overall_score: 0, weekly_summary: '', top_priority: '' });
+    renderGoalsUI(stub, null, false, { noAiYet: true });
   }
 }
 
@@ -2431,7 +2682,8 @@ async function triggerGoalsAnalysis(force = false) {
     }
 
     const { analysis, cached_at } = await res.json();
-    renderGoalsUI(analysis, cached_at, true);
+    const merged = await mergeHabitGoalsIntoAnalysis(analysis);
+    renderGoalsUI(merged, cached_at, true);
 
   } catch (err) {
     container.innerHTML = `
@@ -2443,7 +2695,8 @@ async function triggerGoalsAnalysis(force = false) {
   }
 }
 
-function renderGoalsUI(analysis, cachedAt, freshlyLoaded) {
+function renderGoalsUI(analysis, cachedAt, freshlyLoaded, opts = {}) {
+  const { noAiYet = false } = opts;
   const container = document.getElementById('tab-content');
   if (!container || !analysis) return;
 
@@ -2503,9 +2756,16 @@ function renderGoalsUI(analysis, cachedAt, freshlyLoaded) {
             <div class="stat-box"><div class="stat-box-value ${atRisk > 0 ? 'a' : 'dim'}">${atRisk}</div><div class="stat-box-label">At risk</div></div>
             <div class="stat-box"><div class="stat-box-value dim">${noData}</div><div class="stat-box-label">No data</div></div>
           </div>
-          <button class="btn-secondary" onclick="triggerGoalsAnalysis(true)" style="font-size:11px; padding:5px 12px;">🔄 Refresh analysis</button>
+          ${noAiYet
+            ? `<button class="btn-secondary" onclick="triggerGoalsAnalysis(false)" style="font-size:11px; padding:5px 12px;">Run first analysis ↗</button>`
+            : `<button class="btn-secondary" onclick="triggerGoalsAnalysis(true)" style="font-size:11px; padding:5px 12px;">🔄 Refresh analysis</button>`
+          }
         </div>
       </div>
+      ${noAiYet ? `
+      <div style="background:var(--purple-bg); border-left:2px solid var(--purple); border-radius:0 8px 8px 0; padding:10px 14px;">
+        <p style="font-size:12px; color:var(--purple-light); line-height:1.7;">Faith &amp; Family are tracked live below from your daily check-ins — no AI needed for those. Run analysis to score the rest (trading, fitness, brand, and so on).</p>
+      </div>` : `
       <div style="background:var(--purple-bg); border-left:2px solid var(--purple); border-radius:0 8px 8px 0; padding:10px 14px; margin-bottom:10px;">
         <p style="font-size:11px; font-weight:500; color:var(--text4); text-transform:uppercase; letter-spacing:.06em; margin-bottom:4px;">Weekly summary</p>
         <p style="font-size:12px; color:var(--purple-light); line-height:1.7; font-style:italic;">${escapeHtml(weekly_summary)}</p>
@@ -2515,6 +2775,7 @@ function renderGoalsUI(analysis, cachedAt, freshlyLoaded) {
         <p style="font-size:13px; color:var(--amber); font-weight:500;">${escapeHtml(top_priority)}</p>
       </div>
       <p style="font-size:10px; color:var(--text4); margin-top:10px; text-align:right;">${cachedLabel}</p>
+      `}
     </div>
 
     <!-- Individual goal cards -->
