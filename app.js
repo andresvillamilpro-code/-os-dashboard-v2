@@ -2789,6 +2789,10 @@ async function triggerGoalsAnalysis(force = false) {
     const { data: { session } } = await sb.auth.getSession();
     if (!session) throw new Error('Not logged in');
 
+    // Compute goals 3/5/8 client-side first so Claude gets them as ready-made
+    // context instead of re-guessing data it doesn't need to touch.
+    const clientComputedGoals = (await Promise.all([3, 5, 8].map(computeHabitGoal))).filter(Boolean);
+
     const res = await fetch(`${SUPABASE_URL}/functions/v1/analyze-goals`, {
       method: 'POST',
       headers: {
@@ -2796,7 +2800,7 @@ async function triggerGoalsAnalysis(force = false) {
         'Authorization': `Bearer ${session.access_token}`,
         'apikey': SUPABASE_PUBLISHABLE_KEY,
       },
-      body: JSON.stringify({ force })
+      body: JSON.stringify({ force, client_computed_goals: clientComputedGoals })
     });
 
     if (!res.ok) {
