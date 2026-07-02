@@ -1389,6 +1389,11 @@ async function loadAndRenderDisciplineSection() {
       <div style="flex:1;height:0.5px;background:var(--border2);"></div>
     </div>
 
+    <!-- Motivation verse -->
+    <div style="border-left:2px solid var(--purple);padding:10px 14px;background:var(--purple-bg);border-radius:0 8px 8px 0;margin-bottom:10px;font-size:12px;color:var(--purple-light);line-height:1.7;font-style:italic;font-weight:500;">
+      "Whatever you do, work heartily, as for the Lord and not for men." — Colossians 3:23
+    </div>
+
     <!-- 3 KPI cards -->
     <div class="stat-grid-3" style="margin-bottom:10px;">
       <div class="card stat-box">
