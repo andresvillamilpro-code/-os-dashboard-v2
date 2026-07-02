@@ -1166,11 +1166,16 @@ async function renderTradingTab() {
       <div class="progress-track"><div class="progress-fill" style="width:${goalProgressPct}%;"></div></div>
       <p class="empty-state" style="padding-top:10px; text-align:left;">${amountToGo > 0 ? `$${amountToGo.toLocaleString(undefined, { maximumFractionDigits: 0 })} to go` : 'Target reached!'}</p>
     </div>
+
+    <div id="discipline-section"><p class="loading-text">Loading discipline stats...</p></div>
   `;
 
   attachTradingSettingsHandler();
   attachCsvUploadHandler();
   drawTradingCharts({ balancePoints, byInstrument, byDow, dowNames, byHour });
+
+  // Load discipline section async (doesn't block the main render)
+  loadAndRenderDisciplineSection();
 }
 
 function attachTradingSettingsHandler() {
@@ -1255,6 +1260,321 @@ function drawTradingCharts({ balancePoints, byInstrument, byDow, dowNames, byHou
       options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: textColor, font: { size: 8 }, maxTicksLimit: 12 }, grid: { display: false } }, y: { ticks: { color: textColor, font: { size: 10 } }, grid: { color: gridColor } } }, responsive: true, maintainAspectRatio: false }
     });
   }
+}
+
+// ============================================
+// TRADING DISCIPLINE & PERFORMANCE
+// ============================================
+
+// Weighted scoring — matches the spec exactly
+const DISCIPLINE_WEIGHTS = {
+  // Preparation 20%
+  pre_market_done:   5,
+  htf_bias_done:    10,
+  rules_reviewed:    5,
+  // Execution 40%
+  aplus_setup:      10,
+  full_confirmation:10,
+  entry_model:      10,
+  risk_respected:   10,
+  // Psychology 25%
+  no_fomo:           8,
+  no_revenge:        8,
+  stayed_patient:    5,
+  accepted_outcome:  4,
+  // Review 15%
+  journal_done:      5,
+  screenshots_saved: 5,
+  trade_reviewed:    5,
+};
+
+const DISCIPLINE_SECTIONS = [
+  {
+    key: 'prep', label: 'Preparation', weight: 20,
+    fields: [
+      { key: 'pre_market_done',   label: 'Completed pre-market routine',    weight: 5  },
+      { key: 'htf_bias_done',     label: 'Identified HTF bias before trading', weight: 10 },
+      { key: 'rules_reviewed',    label: 'Reviewed trading rules',          weight: 5  },
+    ]
+  },
+  {
+    key: 'exec', label: 'Execution', weight: 40,
+    fields: [
+      { key: 'aplus_setup',       label: 'Only traded A+ setups',          weight: 10 },
+      { key: 'full_confirmation', label: 'Waited for full confirmation',    weight: 10 },
+      { key: 'entry_model',       label: 'Followed entry model exactly',    weight: 10 },
+      { key: 'risk_respected',    label: 'Respected risk management',       weight: 10 },
+    ]
+  },
+  {
+    key: 'psych', label: 'Psychology', weight: 25,
+    fields: [
+      { key: 'no_fomo',           label: 'No FOMO',                        weight: 8  },
+      { key: 'no_revenge',        label: 'No revenge trading',              weight: 8  },
+      { key: 'stayed_patient',    label: 'Stayed patient',                  weight: 5  },
+      { key: 'accepted_outcome',  label: 'Accepted the outcome',            weight: 4  },
+    ]
+  },
+  {
+    key: 'review', label: 'Review', weight: 15,
+    fields: [
+      { key: 'journal_done',      label: 'Journal completed',               weight: 5  },
+      { key: 'screenshots_saved', label: 'Charts / screenshots saved',      weight: 5  },
+      { key: 'trade_reviewed',    label: 'Trade reviewed before closing',    weight: 5  },
+    ]
+  },
+];
+
+function calcDisciplineScore(session) {
+  let score = 0;
+  for (const [key, weight] of Object.entries(DISCIPLINE_WEIGHTS)) {
+    if (session[key]) score += weight;
+  }
+  return score;
+}
+
+function sectionCompliance(sessions, sectionKey) {
+  const sec = DISCIPLINE_SECTIONS.find(s => s.key === sectionKey);
+  if (!sec || !sessions.length) return 0;
+  const totalPossible = sessions.length * sec.weight;
+  const earned = sessions.reduce((sum, session) => {
+    return sum + sec.fields.reduce((s, f) => s + (session[f.key] ? f.weight : 0), 0);
+  }, 0);
+  return totalPossible ? Math.round((earned / totalPossible) * 100) : 0;
+}
+
+async function loadAndRenderDisciplineSection() {
+  const el = document.getElementById('discipline-section');
+  if (!el) return;
+
+  const { data: sessions } = await sb
+    .from('trading_sessions')
+    .select('*')
+    .order('session_date', { ascending: false })
+    .limit(200);
+
+  const all = sessions || [];
+  const today = todayISO();
+  const todaySession = all.find(s => s.session_date === today) || null;
+
+  // Identity score: % of sessions in last 30 days with discipline_score >= 95
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+  const last30 = all.filter(s => new Date(s.session_date) >= thirtyDaysAgo);
+  const eliteSessions = last30.filter(s => (s.discipline_score || 0) >= 95).length;
+  const identityScore = last30.length ? Math.round((eliteSessions / last30.length) * 100) : 0;
+
+  // Lifetime avg discipline score
+  const avgScore = all.length
+    ? Math.round(all.reduce((s, r) => s + (r.discipline_score || 0), 0) / all.length)
+    : 0;
+
+  // Category compliance (all time)
+  const prepPct  = sectionCompliance(all, 'prep');
+  const execPct  = sectionCompliance(all, 'exec');
+  const psychPct = sectionCompliance(all, 'psych');
+  const revPct   = sectionCompliance(all, 'review');
+
+  // Average ratings
+  const avgFocus = all.length ? (all.reduce((s, r) => s + (r.focus_rating || 0), 0) / all.filter(r => r.focus_rating).length || 0).toFixed(1) : '—';
+  const avgPatience = all.length ? (all.reduce((s, r) => s + (r.patience_rating || 0), 0) / all.filter(r => r.patience_rating).length || 0).toFixed(1) : '—';
+  const avgEmotional = all.length ? (all.reduce((s, r) => s + (r.emotional_rating || 0), 0) / all.filter(r => r.emotional_rating).length || 0).toFixed(1) : '—';
+
+  const scoreColor = (s) => s >= 95 ? 'var(--green)' : s >= 80 ? 'var(--amber)' : s > 0 ? 'var(--red)' : 'var(--text4)';
+
+  el.innerHTML = `
+    <!-- Section divider -->
+    <div style="display:flex;align-items:center;gap:10px;margin:4px 0 10px;">
+      <div style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.08em;color:var(--text4);">Trading discipline &amp; performance</div>
+      <div style="flex:1;height:0.5px;background:var(--border2);"></div>
+    </div>
+
+    <!-- 3 KPI cards -->
+    <div class="stat-grid-3" style="margin-bottom:10px;">
+      <div class="card stat-box">
+        <div class="stat-box-value" style="color:${scoreColor(avgScore)};">${all.length ? avgScore + '%' : '—'}</div>
+        <div class="stat-box-label">Discipline score</div>
+        <div style="font-size:10px;color:var(--text4);margin-top:4px;">lifetime avg</div>
+      </div>
+      <div class="card stat-box">
+        <div class="stat-box-value" style="color:${scoreColor(identityScore)};">${last30.length ? identityScore + '%' : '—'}</div>
+        <div class="stat-box-label">Identity score</div>
+        <div style="font-size:10px;color:var(--text4);margin-top:4px;">sessions ≥ 95 · last 30d</div>
+      </div>
+      <div class="card stat-box">
+        <div class="stat-box-value">${all.length}</div>
+        <div class="stat-box-label">Sessions logged</div>
+        <div style="font-size:10px;color:var(--text4);margin-top:4px;">all time</div>
+      </div>
+    </div>
+
+    <!-- Category compliance (all time) -->
+    ${all.length ? `
+    <div class="card" style="margin-bottom:10px;">
+      <p class="card-title">Category compliance — all time</p>
+      ${[
+        { label: 'Preparation', pct: prepPct, weight: 20 },
+        { label: 'Execution',   pct: execPct,  weight: 40 },
+        { label: 'Psychology',  pct: psychPct, weight: 25 },
+        { label: 'Review',      pct: revPct,   weight: 15 },
+      ].map(c => `
+        <div style="margin-bottom:8px;">
+          <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px;">
+            <span style="color:var(--text2);font-weight:500;">${c.label}</span>
+            <span style="color:var(--text4);">${c.weight}% weight &nbsp;·&nbsp; <span style="color:${scoreColor(c.pct)};font-weight:500;">${c.pct}%</span></span>
+          </div>
+          <div class="progress-track" style="height:5px;">
+            <div class="progress-fill" style="width:${c.pct}%;background:${scoreColor(c.pct)};"></div>
+          </div>
+        </div>`).join('')}
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px;padding-top:10px;border-top:0.5px solid var(--border2);">
+        <div style="text-align:center;"><div style="font-size:16px;font-weight:500;color:var(--text);">${avgFocus}</div><div style="font-size:10px;color:var(--text4);">avg focus</div></div>
+        <div style="text-align:center;"><div style="font-size:16px;font-weight:500;color:var(--text);">${avgPatience}</div><div style="font-size:10px;color:var(--text4);">avg patience</div></div>
+        <div style="text-align:center;"><div style="font-size:16px;font-weight:500;color:var(--text);">${avgEmotional}</div><div style="font-size:10px;color:var(--text4);">avg emotional ctrl</div></div>
+      </div>
+    </div>` : ''}
+
+    <!-- Today's session log -->
+    <div class="card">
+      <div class="card-header">
+        <p class="card-title" style="margin-bottom:0;">Log today's session</p>
+        ${todaySession ? `<span style="font-size:11px;font-weight:500;color:var(--green);">✅ Logged — score: ${todaySession.discipline_score}%</span>` : '<span class="card-meta">Not logged yet</span>'}
+      </div>
+      <form id="session-form">
+        ${DISCIPLINE_SECTIONS.map(sec => `
+          <div style="margin-bottom:12px;">
+            <div style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.07em;color:var(--text4);margin-bottom:6px;">${sec.label} — ${sec.weight}%</div>
+            ${sec.fields.map(f => `
+              <div class="check-row">
+                <input type="checkbox" name="${f.key}" ${todaySession?.[f.key] ? 'checked' : ''} />
+                <label class="check-label" style="flex:1;">${f.label}</label>
+                <span style="font-size:10px;color:var(--text4);">${f.weight}%</span>
+              </div>`).join('')}
+          </div>`).join('')}
+
+        <div style="border-top:0.5px solid var(--border2);padding-top:12px;margin-top:4px;">
+          <div style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.07em;color:var(--text4);margin-bottom:10px;">Quick ratings</div>
+          ${[
+            { key: 'focus_rating',     label: 'Focus'            },
+            { key: 'patience_rating',  label: 'Patience'         },
+            { key: 'emotional_rating', label: 'Emotional control' },
+          ].map(r => `
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+              <span style="font-size:12px;color:var(--text2);min-width:120px;">${r.label}</span>
+              <div style="display:flex;gap:4px;" id="rating-${r.key}">
+                ${[1,2,3,4,5].map(n => `
+                  <div onclick="setRating('${r.key}',${n})" data-val="${n}"
+                    style="width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;cursor:pointer;border:0.5px solid ${(todaySession?.[r.key]||0)>=n?'var(--purple)':'var(--border2)'};background:${(todaySession?.[r.key]||0)>=n?'var(--purple-bg)':'var(--bg3)'};color:${(todaySession?.[r.key]||0)>=n?'var(--purple-light)':'var(--text4)'};">★</div>`).join('')}
+              </div>
+              <input type="hidden" name="${r.key}" value="${todaySession?.[r.key] || 0}" />
+            </div>`).join('')}
+        </div>
+
+        <div style="margin-top:10px;">
+          <div style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.07em;color:var(--text4);margin-bottom:6px;">Biggest lesson today <span style="color:var(--text4);font-weight:400;">(one sentence)</span></div>
+          <input type="text" name="lesson" value="${escapeHtml(todaySession?.lesson || '')}" placeholder="e.g. Entered too early before BOS confirmation."
+            style="width:100%;background:var(--bg3);border:0.5px solid var(--border);border-radius:7px;padding:8px 10px;font-size:12px;color:var(--text2);outline:none;font-family:var(--font);" />
+        </div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;">
+          <div id="session-score-preview" style="font-size:13px;color:var(--text3);">Score: —</div>
+          <button type="submit" class="btn-secondary">Save session</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Recent sessions -->
+    ${all.length > 0 ? `
+    <div class="card">
+      <p class="card-title">Recent sessions</p>
+      ${all.slice(0, 7).map(s => {
+        const col = scoreColor(s.discipline_score || 0);
+        return `<div class="check-row">
+          <span class="check-label" style="color:var(--text4);min-width:90px;">${s.session_date}</span>
+          <div style="flex:1;margin:0 10px;height:4px;background:var(--bg3);border-radius:2px;overflow:hidden;">
+            <div style="height:100%;background:${col};width:${s.discipline_score || 0}%;border-radius:2px;"></div>
+          </div>
+          <span style="font-size:12px;font-weight:500;color:${col};min-width:36px;text-align:right;">${s.discipline_score || 0}%</span>
+        </div>`;
+      }).join('')}
+    </div>` : ''}
+  `;
+
+  attachSessionFormHandlers();
+}
+
+function setRating(key, val) {
+  // Update hidden input
+  const input = document.querySelector(`input[name="${key}"]`);
+  if (input) input.value = val;
+  // Update star UI
+  const container = document.getElementById(`rating-${key}`);
+  if (!container) return;
+  container.querySelectorAll('[data-val]').forEach(star => {
+    const n = Number(star.dataset.val);
+    const active = n <= val;
+    star.style.border = `0.5px solid ${active ? 'var(--purple)' : 'var(--border2)'}`;
+    star.style.background = active ? 'var(--purple-bg)' : 'var(--bg3)';
+    star.style.color = active ? 'var(--purple-light)' : 'var(--text4)';
+  });
+  updateScorePreview();
+}
+
+function updateScorePreview() {
+  const form = document.getElementById('session-form');
+  if (!form) return;
+  const session = {};
+  for (const [key] of Object.entries(DISCIPLINE_WEIGHTS)) {
+    const cb = form.querySelector(`input[name="${key}"]`);
+    session[key] = cb?.checked || false;
+  }
+  const score = calcDisciplineScore(session);
+  const el = document.getElementById('session-score-preview');
+  if (el) {
+    const col = score >= 95 ? 'var(--green)' : score >= 80 ? 'var(--amber)' : 'var(--red)';
+    el.innerHTML = `Score: <span style="font-weight:500;color:${col};">${score}%</span>`;
+  }
+}
+
+function attachSessionFormHandlers() {
+  const form = document.getElementById('session-form');
+  if (!form) return;
+
+  // Live score preview on checkbox change
+  form.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', updateScorePreview);
+  });
+  updateScorePreview();
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const today = todayISO();
+    const { data: { user } } = await sb.auth.getUser();
+
+    // Build session object from form
+    const session = { session_date: today, user_id: user?.id };
+    for (const [key] of Object.entries(DISCIPLINE_WEIGHTS)) {
+      const cb = form.querySelector(`input[name="${key}"]`);
+      session[key] = cb?.checked || false;
+    }
+    ['focus_rating', 'patience_rating', 'emotional_rating'].forEach(key => {
+      const inp = form.querySelector(`input[name="${key}"]`);
+      session[key] = inp ? (parseInt(inp.value) || null) : null;
+    });
+    const lessonInput = form.querySelector('input[name="lesson"]');
+    session.lesson = lessonInput?.value?.trim() || null;
+    session.discipline_score = calcDisciplineScore(session);
+
+    // Upsert (insert or update if today's session already exists)
+    const { error } = await sb.from('trading_sessions')
+      .upsert(session, { onConflict: 'user_id,session_date' });
+
+    if (error) {
+      alert('Save failed: ' + error.message);
+      return;
+    }
+    loadAndRenderDisciplineSection();
+  });
 }
 
 // ============================================
