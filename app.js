@@ -54,15 +54,8 @@ const CONSISTENCY_ITEMS = [
   'Magnesium',
   'Gym',
   'Family time',
-  '20 pages reading',
-  'Served or encouraged someone'
+  '20 pages reading'
 ];
-
-// Display-only label overrides — the item_name stored in the DB stays
-// the same (so history/streaks keep working), only what's shown changes.
-const ITEM_DISPLAY_LABELS = {
-  'Family time': 'Intentional Family Time'
-};
 
 // ============================================
 // AUTH HELPERS
@@ -195,13 +188,11 @@ async function renderDailyTab() {
   if (!user) return;
 
   const today = todayISO();
-  const weekStart = isoDate(getMondayOfWeek());
 
-  const [snapshot, routine, consistency, weeklyChecks, goals, tasks] = await Promise.all([
+  const [snapshot, routine, consistency, goals, tasks] = await Promise.all([
     loadTradingSnapshot(),
     loadChecklist('morning_routine_log', MORNING_ROUTINE_ITEMS, today),
     loadChecklist('consistency_log', CONSISTENCY_ITEMS, today),
-    loadWeeklyChecklist('weekly_checks', WEEKLY_ITEMS, weekStart),
     loadTopGoals(today),
     loadTasks()
   ]);
@@ -215,13 +206,11 @@ async function renderDailyTab() {
       ${renderTaskListCard(tasks)}
     </div>
     ${renderChecklistCard('Consistency check', 'consistency', consistency)}
-    ${renderWeeklyChecklistCard('This week', 'weekly-checks', weeklyChecks)}
     ${renderTradingSnapshotBox(snapshot)}
   `;
 
   attachChecklistHandlers('morning_routine_log', 'morning-routine');
   attachChecklistHandlers('consistency_log', 'consistency');
-  attachWeeklyChecklistHandlers('weekly_checks', 'weekly-checks');
   attachTopGoalsHandlers();
   attachTaskListHandlers();
   initGoogleCalendar();
@@ -341,66 +330,6 @@ async function loadChecklist(table, items, date) {
   }));
 }
 
-// ---------- Generic WEEKLY checklist (e.g. Church attendance) ----------
-// Same shape as the daily checklist above, but keyed by week_start (Monday)
-// instead of log_date, stored in its own `weekly_checks` table.
-
-const WEEKLY_ITEMS = ['Attended church this week'];
-
-async function loadWeeklyChecklist(table, items, weekStart) {
-  const { data } = await sb.from(table).select('*').eq('week_start', weekStart);
-  const byName = {};
-  (data || []).forEach(row => { byName[row.item_name] = row; });
-  return items.map(name => ({
-    item_name: name,
-    completed: byName[name]?.completed || false,
-    id: byName[name]?.id || null
-  }));
-}
-
-function renderWeeklyChecklistCard(title, idPrefix, rows) {
-  return `
-    <div class="card">
-      <p class="card-title">${title}</p>
-      <div id="${idPrefix}-list">
-        ${rows.map((r, i) => `
-          <div class="check-row">
-            <input type="checkbox" data-idx="${i}" ${r.completed ? 'checked' : ''} />
-            <label class="check-label">${escapeHtml(ITEM_DISPLAY_LABELS[r.item_name] || r.item_name)}</label>
-          </div>
-        `).join('')}
-      </div>
-    </div>
-  `;
-}
-
-function attachWeeklyChecklistHandlers(table, idPrefix) {
-  const items = WEEKLY_ITEMS;
-  const list = document.getElementById(`${idPrefix}-list`);
-  if (!list) return;
-  const weekStart = isoDate(getMondayOfWeek());
-  list.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-    cb.addEventListener('change', async (e) => {
-      const idx = Number(e.target.dataset.idx);
-      const itemName = items[idx];
-      const completed = e.target.checked;
-
-      const { data: existing } = await sb
-        .from(table)
-        .select('id')
-        .eq('week_start', weekStart)
-        .eq('item_name', itemName)
-        .maybeSingle();
-
-      if (existing) {
-        await sb.from(table).update({ completed }).eq('id', existing.id);
-      } else {
-        await sb.from(table).insert({ week_start: weekStart, item_name: itemName, completed, user_id: (await sb.auth.getUser()).data.user?.id });
-      }
-    });
-  });
-}
-
 function renderChecklistCard(title, idPrefix, rows) {
   return `
     <div class="card">
@@ -409,7 +338,7 @@ function renderChecklistCard(title, idPrefix, rows) {
         ${rows.map((r, i) => `
           <div class="check-row">
             <input type="checkbox" data-idx="${i}" ${r.completed ? 'checked' : ''} />
-            <label class="check-label">${escapeHtml(ITEM_DISPLAY_LABELS[r.item_name] || r.item_name)}</label>
+            <label class="check-label">${escapeHtml(r.item_name)}</label>
           </div>
         `).join('')}
       </div>
@@ -785,6 +714,86 @@ function serverTimeToLocalParts(date, targetTimeZone = 'America/Toronto') {
   });
   const lp = Object.fromEntries(localFmt.formatToParts(new Date(realUTC)).map(p => [p.type, p.value]));
   return { hour: (lp.hour === '24' ? 0 : Number(lp.hour)), weekday: lp.weekday };
+}
+
+// ── serverDateKey: converts an MT5-stored trade timestamp to the FTMO server
+// calendar day (Europe/Helsinki) — used for daily loss limit checking.
+function serverDateKey(date) {
+  const y = date.getFullYear(), mo = date.getMonth(), d = date.getDate();
+  const hh = date.getHours(), mm = date.getMinutes(), ss = date.getSeconds();
+  const naiveUTC = Date.UTC(y, mo, d, hh, mm, ss);
+  const serverFmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/Helsinki', hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit'
+  });
+  const sp = Object.fromEntries(serverFmt.formatToParts(new Date(naiveUTC)).map(p => [p.type, p.value]));
+  return `${sp.year}-${sp.month}-${sp.day}`;
+}
+
+// ── computeChallengeProgress: pure function, reused by Trading tab + Goals system (Goal #2).
+// Combines profit target progress, max drawdown, and worst daily loss.
+function computeChallengeProgress(trades, settings) {
+  const accountSize = Number(settings.account_size) || 100000;
+  const profitTargetPct = Number(settings.profit_target_pct) || 10;
+  const maxDrawdownLimitPct = Number(settings.max_drawdown_pct) || 10;
+  const dailyLossLimitPct = Number(settings.daily_loss_limit_pct) || 5;
+
+  const totalPnl = trades.reduce((s, t) => s + netResult(t), 0);
+  const currentBalance = accountSize + totalPnl;
+  const targetBalance = accountSize * (1 + profitTargetPct / 100);
+  const goalProgressPct = targetBalance > accountSize
+    ? Math.max(0, Math.min(100, ((currentBalance - accountSize) / (targetBalance - accountSize)) * 100))
+    : 0;
+  const amountToGo = Math.max(0, targetBalance - currentBalance);
+
+  const sorted = [...trades].sort((a, b) => new Date(a.open_time) - new Date(b.open_time));
+  let running = accountSize, peak = accountSize, maxDrawdownPct = 0;
+  sorted.forEach(t => {
+    running += netResult(t);
+    if (running > peak) peak = running;
+    const dd = peak > 0 ? ((peak - running) / peak) * 100 : 0;
+    if (dd > maxDrawdownPct) maxDrawdownPct = dd;
+  });
+
+  const byServerDay = {};
+  sorted.forEach(t => {
+    const key = serverDateKey(new Date(t.open_time));
+    byServerDay[key] = (byServerDay[key] || 0) + netResult(t);
+  });
+  const dailyLossLimitUsd = accountSize * (dailyLossLimitPct / 100);
+  let worstDailyLossPct = 0, breachDays = 0;
+  Object.values(byServerDay).forEach(dayPnl => {
+    if (dayPnl < 0) {
+      const lossPct = (Math.abs(dayPnl) / accountSize) * 100;
+      if (lossPct > worstDailyLossPct) worstDailyLossPct = lossPct;
+      if (Math.abs(dayPnl) >= dailyLossLimitUsd) breachDays++;
+    }
+  });
+
+  const drawdownBreached = maxDrawdownPct >= maxDrawdownLimitPct;
+  const dailyBreached = breachDays > 0;
+  const hasAnyData = trades.length > 0;
+  const passed = hasAnyData && goalProgressPct >= 100 && !drawdownBreached && !dailyBreached;
+
+  let status, statusColor, statusBg, statusLabel;
+  if (!hasAnyData) {
+    status = 'no_data'; statusColor = 'var(--text4)'; statusBg = 'var(--bg3)'; statusLabel = '— No trades yet';
+  } else if (drawdownBreached || dailyBreached) {
+    status = 'critical'; statusColor = 'var(--red)'; statusBg = 'var(--red-bg)'; statusLabel = '⛔ Challenge rules breached';
+  } else if (passed) {
+    status = 'on_track'; statusColor = 'var(--green)'; statusBg = 'var(--green-bg)'; statusLabel = '✅ Target reached';
+  } else if (maxDrawdownPct >= maxDrawdownLimitPct * 0.7 || worstDailyLossPct >= dailyLossLimitPct * 0.7) {
+    status = 'at_risk'; statusColor = 'var(--amber)'; statusBg = 'var(--amber-bg)'; statusLabel = '⚠️ Close to limits';
+  } else {
+    status = 'on_track'; statusColor = 'var(--blue)'; statusBg = 'var(--blue-bg)'; statusLabel = '📈 On track';
+  }
+
+  return {
+    hasAnyData, currentBalance, targetBalance, goalProgressPct, amountToGo,
+    maxDrawdownPct, maxDrawdownLimitPct, worstDailyLossPct, dailyLossLimitPct,
+    breachDays, drawdownBreached, dailyBreached, passed,
+    status, statusColor, statusBg, statusLabel,
+  };
 }
 
 const TRADING_CHARTS = {}; // holds Chart.js instances so we can destroy/recreate on re-render
@@ -2414,6 +2423,285 @@ function attachFitnessSessionHandlers(weekStart, weekData) {
 }
 
 // ============================================
+// WEEKLY CHECKLIST (church attendance etc.)
+// ============================================
+
+const ITEM_DISPLAY_LABELS = {
+  'Family time': 'Intentional Family Time'
+};
+
+const WEEKLY_ITEMS = ['Attended church this week'];
+
+async function loadWeeklyChecklist(table, items, weekStart) {
+  const { data } = await sb.from(table).select('*').eq('week_start', weekStart);
+  const byName = {};
+  (data || []).forEach(row => { byName[row.item_name] = row; });
+  return items.map(name => ({
+    item_name: name,
+    completed: byName[name]?.completed || false,
+    id: byName[name]?.id || null
+  }));
+}
+
+function renderWeeklyChecklistCard(title, idPrefix, rows) {
+  return `
+    <div class="card">
+      <p class="card-title">${title}</p>
+      <div id="${idPrefix}-list">
+        ${rows.map((r, i) => `
+          <div class="check-row">
+            <input type="checkbox" data-idx="${i}" ${r.completed ? 'checked' : ''} />
+            <label class="check-label">${escapeHtml(ITEM_DISPLAY_LABELS[r.item_name] || r.item_name)}</label>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function attachWeeklyChecklistHandlers(table, idPrefix) {
+  const items = WEEKLY_ITEMS;
+  const list = document.getElementById(`${idPrefix}-list`);
+  if (!list) return;
+  const weekStart = isoDate(getMondayOfWeek());
+  list.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', async (e) => {
+      const idx = Number(e.target.dataset.idx);
+      const itemName = items[idx];
+      const completed = e.target.checked;
+      const { data: existing } = await sb.from(table).select('id')
+        .eq('week_start', weekStart).eq('item_name', itemName).maybeSingle();
+      if (existing) {
+        await sb.from(table).update({ completed }).eq('id', existing.id);
+      } else {
+        await sb.from(table).insert({ week_start: weekStart, item_name: itemName, completed, user_id: (await sb.auth.getUser()).data.user?.id });
+      }
+    });
+  });
+}
+
+// ============================================
+// GOAL SCORING — DETERMINISTIC CLIENT-SIDE
+// Goals 2, 3, 5, 8 are computed here from real
+// data and sent to Claude as reference, so Claude
+// only scores what can't be calculated exactly.
+// ============================================
+
+function addDaysISO(dateStr, delta) {
+  const d = new Date(dateStr + 'T00:00:00');
+  d.setDate(d.getDate() + delta);
+  return isoDate(d);
+}
+
+// Daily-cadence metric stats (last 30 days + last 7 days trend)
+async function calcDailyMetricStats(table, itemName, { capPerWeek = null } = {}) {
+  const todayStr = todayISO();
+  const startStr = addDaysISO(todayStr, -29);
+  const { data } = await sb.from(table).select('log_date, completed')
+    .eq('item_name', itemName).gte('log_date', startStr).lte('log_date', todayStr);
+  const byDate = {};
+  (data || []).forEach(r => { if (r.completed) byDate[r.log_date] = true; });
+  const hasAnyData = Object.keys(byDate).length > 0;
+  const days = [];
+  for (let i = 0; i < 30; i++) days.push(addDaysISO(todayStr, -29 + i));
+  const last7 = days.slice(-7), prev7 = days.slice(-14, -7);
+  const count = (list) => list.filter(d => byDate[d]).length;
+  const cap7 = capPerWeek || 7;
+  const cap30 = capPerWeek ? Math.round(capPerWeek * 30 / 7) : 30;
+  const last7Scored = Math.min(1, count(last7) / cap7);
+  const last30Scored = Math.min(1, count(days) / cap30);
+  const prev7Scored = Math.min(1, count(prev7) / cap7);
+  const score = hasAnyData ? Math.round((0.6 * last7Scored + 0.4 * last30Scored) * 100) : 0;
+  const trend = !hasAnyData ? 'no_data' : last7Scored > prev7Scored + 0.05 ? 'up' : last7Scored < prev7Scored - 0.05 ? 'down' : 'stable';
+  return { score, trend, hasAnyData, last7: count(last7), cap7, last30: count(days), cap30 };
+}
+
+// Weekly-cadence metric stats (e.g. church attendance)
+async function calcWeeklyMetricStats(table, itemName, weeksBack = 4) {
+  const weekStartStr = isoDate(getMondayOfWeek());
+  const earliestWeekStr = isoDate(getMondayOfWeek(new Date(new Date(weekStartStr).getTime() - (weeksBack - 1) * 7 * 86400000)));
+  const { data } = await sb.from(table).select('week_start, completed')
+    .eq('item_name', itemName).gte('week_start', earliestWeekStr).lte('week_start', weekStartStr);
+  const byWeek = {};
+  (data || []).forEach(r => { byWeek[r.week_start] = r.completed; });
+  const hasAnyData = Object.keys(byWeek).length > 0;
+  const weeks = [];
+  for (let i = weeksBack - 1; i >= 0; i--) weeks.push(isoDate(getMondayOfWeek(new Date(new Date(weekStartStr).getTime() - i * 7 * 86400000))));
+  const attendedCount = weeks.filter(w => byWeek[w]).length;
+  const rate = attendedCount / weeks.length;
+  const score = hasAnyData ? Math.round(rate * 100) : 0;
+  const thisWeek = byWeek[weekStartStr];
+  const lastWeek = byWeek[weeks[weeks.length - 2]];
+  const trend = !hasAnyData ? 'no_data' : thisWeek && !lastWeek ? 'up' : !thisWeek && lastWeek ? 'down' : 'stable';
+  return { score, trend, hasAnyData, attended: attendedCount, total: weeks.length };
+}
+
+function habitStatusFromScore(score, hasAnyData) {
+  if (!hasAnyData) return 'no_data';
+  if (score >= 85) return 'on_track';
+  if (score >= 60) return 'at_risk';
+  return 'critical';
+}
+
+// Composite goal from multiple weighted metrics
+async function computeCompositeGoal(goalId, metrics) {
+  const results = await Promise.all(metrics.map(async m => {
+    const stats = m.cadence === 'weekly'
+      ? await calcWeeklyMetricStats(m.table, m.itemName, m.weeksBack || 4)
+      : await calcDailyMetricStats(m.table, m.itemName, { capPerWeek: m.capPerWeek });
+    return { ...m, stats };
+  }));
+  const active = results.filter(r => r.stats.hasAnyData);
+  if (!active.length) return { id: goalId, score: 0, trend: 'no_data', status: 'no_data', insight: 'No data logged yet.' };
+  const weightSum = active.reduce((s, r) => s + r.weight, 0);
+  const score = Math.round(active.reduce((s, r) => s + r.stats.score * (r.weight / weightSum), 0));
+  const ups = active.filter(r => r.stats.trend === 'up').length;
+  const downs = active.filter(r => r.stats.trend === 'down').length;
+  const trend = ups > downs ? 'up' : downs > ups ? 'down' : 'stable';
+  const parts = results.map(r => {
+    if (!r.stats.hasAnyData) return `${r.label}: no data`;
+    return `${r.label}: ${r.stats.score}%`;
+  });
+  const insight = parts.join(' · ');
+  return { id: goalId, score, trend, status: habitStatusFromScore(score, true), insight };
+}
+
+// Goal 5 — Faith metrics
+const FAITH_METRICS = [
+  { table: 'consistency_log', itemName: 'Pray and bible study', label: 'Prayer + Bible', weight: 70, cadence: 'daily' },
+  { table: 'weekly_checks', itemName: 'Attended church this week', label: 'Church attendance', weight: 30, cadence: 'weekly' },
+];
+
+// Goal 8 — Family metrics
+const FAMILY_METRICS = [
+  { table: 'consistency_log', itemName: 'Family time', label: 'Intentional family time', weight: 100, cadence: 'daily' },
+];
+
+// Session score stats (trading discipline + fitness discipline)
+async function calcSessionScoreStats(table, dateField, scoreField, { scale = 1 } = {}) {
+  const todayStr = todayISO();
+  const start30 = addDaysISO(todayStr, -29);
+  const start7 = addDaysISO(todayStr, -6);
+  const { data } = await sb.from(table).select(`${dateField}, ${scoreField}`)
+    .gte(dateField, start30).lte(dateField, todayStr).order(dateField);
+  const rows = data || [];
+  const hasAnyData = rows.length > 0;
+  const scoreOf = r => (r[scoreField] || 0) * scale;
+  const last7Rows = rows.filter(r => r[dateField] >= start7);
+  const prev7Rows = rows.filter(r => r[dateField] >= addDaysISO(todayStr, -13) && r[dateField] < start7);
+  const avg = (list) => list.length ? list.reduce((s, r) => s + scoreOf(r), 0) / list.length : null;
+  const last30Avg = avg(rows);
+  const last7Avg = avg(last7Rows);
+  const prev7Avg = avg(prev7Rows);
+  const blendedLast7 = last7Avg != null ? last7Avg : (last30Avg || 0);
+  const score = hasAnyData ? Math.round(0.6 * blendedLast7 + 0.4 * (last30Avg || 0)) : 0;
+  const trend = !hasAnyData ? 'no_data' : last7Avg != null && prev7Avg != null
+    ? (last7Avg > prev7Avg + 2 ? 'up' : last7Avg < prev7Avg - 2 ? 'down' : 'stable')
+    : 'stable';
+  return { score, trend, hasAnyData, last30Avg, last7Avg, sessions: rows.length };
+}
+
+// Checklist group stats (multiple items from one table)
+async function calcChecklistGroupStats(table, itemNames) {
+  const todayStr = todayISO();
+  const startStr = addDaysISO(todayStr, -29);
+  const { data } = await sb.from(table).select('log_date, item_name, completed')
+    .in('item_name', itemNames).gte('log_date', startStr).lte('log_date', todayStr);
+  const byDate = {};
+  (data || []).forEach(r => {
+    if (!byDate[r.log_date]) byDate[r.log_date] = {};
+    byDate[r.log_date][r.item_name] = r.completed;
+  });
+  const hasAnyData = Object.keys(byDate).length > 0;
+  const days = [];
+  for (let i = 0; i < 30; i++) days.push(addDaysISO(todayStr, -29 + i));
+  const dayRate = (d) => {
+    const entry = byDate[d];
+    if (!entry) return 0;
+    const done = itemNames.filter(n => entry[n]).length;
+    return done / itemNames.length;
+  };
+  const avg = (list) => list.reduce((s, d) => s + dayRate(d), 0) / list.length;
+  const last30Rate = avg(days);
+  const last7Rate = avg(days.slice(-7));
+  const score = hasAnyData ? Math.round((0.6 * last7Rate + 0.4 * last30Rate) * 100) : 0;
+  const trend = !hasAnyData ? 'no_data' : last7Rate > last30Rate + 0.05 ? 'up' : last7Rate < last30Rate - 0.05 ? 'down' : 'stable';
+  return { score, trend, hasAnyData };
+}
+
+// Items from consistency_log that feed the Discipline System goal
+const CONSISTENCY_SYSTEM_ITEMS = CONSISTENCY_ITEMS.filter(
+  i => !['Family time', '20 pages reading'].includes(i)
+);
+
+// Goal 3 — Discipline System (trading + fitness + morning + consistency)
+async function computeDisciplineSystemGoal() {
+  const [trading, fitness, morning, systems] = await Promise.all([
+    calcSessionScoreStats('trading_sessions', 'session_date', 'discipline_score'),
+    calcSessionScoreStats('fitness_daily_session', 'session_date', 'discipline_score', { scale: 100 / 80 }),
+    calcChecklistGroupStats('morning_routine_log', MORNING_ROUTINE_ITEMS),
+    calcChecklistGroupStats('consistency_log', CONSISTENCY_SYSTEM_ITEMS),
+  ]);
+  const metrics = [
+    { label: 'Trading discipline', stats: trading, weight: 35 },
+    { label: 'Fitness discipline', stats: fitness, weight: 25 },
+    { label: 'Morning routine', stats: morning, weight: 25 },
+    { label: 'Consistency', stats: systems, weight: 15 },
+  ];
+  const active = metrics.filter(m => m.stats.hasAnyData);
+  if (!active.length) return { id: 3, score: 0, trend: 'no_data', status: 'no_data', insight: 'No discipline data logged yet.' };
+  const weightSum = active.reduce((s, m) => s + m.weight, 0);
+  const score = Math.round(active.reduce((s, m) => s + m.stats.score * (m.weight / weightSum), 0));
+  const trend = active.some(m => m.stats.trend === 'up') ? 'up' : active.some(m => m.stats.trend === 'down') ? 'down' : 'stable';
+  const insight = metrics.map(m => m.stats.hasAnyData ? `${m.label}: ${m.stats.score}%` : `${m.label}: no data`).join(' · ');
+  return { id: 3, score, trend, status: habitStatusFromScore(score, true), insight };
+}
+
+// Goal 2 — FTMO Challenge Progress
+async function computeTradingChallengeGoal() {
+  const [settingsRes, tradesRes] = await Promise.all([
+    sb.from('trading_settings').select('*').limit(1),
+    sb.from('trades').select('open_time, profit, swap, commission'),
+  ]);
+  const trades = tradesRes.data || [];
+  const settings = settingsRes.data?.[0] || {};
+  const c = computeChallengeProgress(trades, settings);
+  const score = Math.round(c.goalProgressPct);
+  const status = (c.drawdownBreached || c.dailyBreached) ? 'critical' : habitStatusFromScore(score, c.hasAnyData);
+  const insight = c.hasAnyData
+    ? `Balance $${Math.round(c.currentBalance).toLocaleString()} of $${Math.round(c.targetBalance).toLocaleString()} — ${score}% to target. Drawdown: ${c.maxDrawdownPct.toFixed(1)}% used of ${c.maxDrawdownLimitPct}%.`
+    : 'No trades imported yet.';
+  return { id: 2, score, trend: score > 0 ? 'up' : 'no_data', status, insight };
+}
+
+// Dispatch for habit-based goals
+async function computeHabitGoal(goalId) {
+  if (goalId === 2) return computeTradingChallengeGoal();
+  if (goalId === 3) return computeDisciplineSystemGoal();
+  if (goalId === 5) return computeCompositeGoal(5, FAITH_METRICS);
+  if (goalId === 8) return computeCompositeGoal(8, FAMILY_METRICS);
+  return { id: goalId, score: 0, trend: 'no_data', status: 'no_data', insight: 'Not yet implemented.' };
+}
+
+// Compute all client-side goals and merge them into the cached analysis
+async function mergeHabitGoalsIntoAnalysis(analysis) {
+  const base = analysis || {};
+  const goals = Array.isArray(base.goals) ? [...base.goals] : [];
+  const ids = [2, 3, 5, 8];
+  const computed = await Promise.all(ids.map(computeHabitGoal));
+  computed.forEach(g => {
+    const idx = goals.findIndex(x => x.id === g.id);
+    if (idx >= 0) goals[idx] = g; else goals.push(g);
+  });
+  goals.sort((a, b) => a.id - b.id);
+  const scored = goals.filter(g => g.status !== 'no_data');
+  const overall_score = scored.length
+    ? Math.round(scored.reduce((s, g) => s + (g.score || 0), 0) / scored.length)
+    : 0;
+  return { ...base, goals, overall_score };
+}
+
+// ============================================
 // GOALS TAB — AI-powered analysis via Supabase Edge Function
 // ============================================
 
@@ -2423,10 +2711,8 @@ const GOALS_META = [
   { id: 3, name: 'Build an Elite Discipline System', priority: 'critical' },
   { id: 4, name: 'Reach 200 lbs With Improved Strength', priority: 'high' },
   { id: 5, name: 'Strengthen Relationship With God', priority: 'high' },
-  { id: 6, name: 'Build the Personal Brand of Andres', priority: 'medium' },
-  { id: 7, name: 'Build Your Personal Operating System', priority: 'medium' },
   { id: 8, name: 'Become More Present With Family', priority: 'medium' },
-  { id: 9, name: 'Launch and Validate Inarmoni', priority: 'support' },
+  // Goals 6, 7, 9 not yet shown — tracking not built yet
 ];
 
 const PRIORITY_STYLE = {
@@ -2445,319 +2731,13 @@ const STATUS_STYLE = {
 
 const TREND_ICON = { up: '↑', down: '↓', stable: '→', no_data: '—' };
 
-// ============================================
-// HABIT-BASED GOAL TRACKING — Faith (#5) & Family (#8)
-// Deterministic, computed client-side straight from the existing
-// checklist tables. No AI / Edge Function involved for these two —
-// they're real logged data, not an estimate.
-// ============================================
-
-function addDaysISO(dateStr, delta) {
-  const d = new Date(dateStr + 'T00:00:00');
-  d.setDate(d.getDate() + delta);
-  return isoDate(d);
-}
-
-// Daily-cadence metric (e.g. Prayer, Family Time, Service).
-// `capPerWeek`, if set, means the metric hits 100% once it's done that many
-// times in a 7-day window — e.g. Service only needs 3/7 for a full score,
-// it doesn't need to be daily.
-async function calcDailyMetricStats(table, itemName, { capPerWeek = null } = {}) {
-  const todayStr = todayISO();
-  const startStr = addDaysISO(todayStr, -29); // 30-day window incl. today
-
-  const { data } = await sb
-    .from(table)
-    .select('log_date, completed')
-    .eq('item_name', itemName)
-    .gte('log_date', startStr)
-    .lte('log_date', todayStr);
-
-  const byDate = {};
-  (data || []).forEach(row => { byDate[row.log_date] = !!row.completed; });
-  const hasAnyData = Object.keys(byDate).length > 0;
-
-  const days = [];
-  for (let i = 29; i >= 0; i--) days.push(addDaysISO(todayStr, -i));
-
-  const last7 = days.slice(-7);
-  const prev7 = days.slice(-14, -7);
-  const count = (list) => list.filter(d => byDate[d]).length;
-
-  // Raw rate (used for streak-style day counts in the insight text), and a
-  // "scored" rate that applies the weekly cap if one's set.
-  const last7Count = count(last7);
-  const last30Count = count(days);
-  const prev7Count = count(prev7);
-
-  const cap7 = capPerWeek || 7;
-  const cap30 = capPerWeek ? Math.round(capPerWeek * 30 / 7) : 30;
-
-  const last7Scored = Math.min(1, last7Count / cap7);
-  const last30Scored = Math.min(1, last30Count / cap30);
-  const prev7Scored = Math.min(1, prev7Count / cap7);
-
-  let streak = 0;
-  for (let i = days.length - 1; i >= 0; i--) {
-    if (byDate[days[i]]) streak++;
-    else break;
-  }
-
-  let trend = 'stable';
-  if (last7Scored > prev7Scored + 0.1) trend = 'up';
-  else if (last7Scored < prev7Scored - 0.1) trend = 'down';
-
-  const score = hasAnyData ? Math.round((0.6 * last7Scored + 0.4 * last30Scored) * 100) : 0;
-
-  return { hasAnyData, score, last7Count, last30Count, streak, trend };
-}
-
-// Weekly-cadence metric (e.g. Church attendance) — looks back N weeks
-// (including the current week) rather than N days.
-async function calcWeeklyMetricStats(table, itemName, weeksBack = 4) {
-  const weekStartStr = isoDate(getMondayOfWeek());
-  const earliestWeekStr = isoDate(getMondayOfWeek(new Date(new Date(weekStartStr).getTime() - (weeksBack - 1) * 7 * 86400000)));
-
-  const { data } = await sb
-    .from(table)
-    .select('week_start, completed')
-    .eq('item_name', itemName)
-    .gte('week_start', earliestWeekStr)
-    .lte('week_start', weekStartStr);
-
-  const byWeek = {};
-  (data || []).forEach(row => { byWeek[row.week_start] = !!row.completed; });
-  const hasAnyData = Object.keys(byWeek).length > 0;
-
-  const weeks = [];
-  for (let i = weeksBack - 1; i >= 0; i--) {
-    weeks.push(isoDate(getMondayOfWeek(new Date(new Date(weekStartStr).getTime() - i * 7 * 86400000))));
-  }
-
-  const attendedCount = weeks.filter(w => byWeek[w]).length;
-  const rate = attendedCount / weeks.length;
-  const score = hasAnyData ? Math.round(rate * 100) : 0;
-
-  const thisWeek = byWeek[weekStartStr];
-  const lastWeek = byWeek[weeks[weeks.length - 2]];
-  let trend = 'stable';
-  if (thisWeek && !lastWeek) trend = 'up';
-  else if (!thisWeek && lastWeek) trend = 'down';
-
-  return { hasAnyData, score, attendedCount, weeksBack, trend };
-}
-
-function habitStatusFromScore(score, hasAnyData) {
-  if (!hasAnyData) return 'no_data';
-  if (score >= 70) return 'on_track';
-  if (score >= 40) return 'at_risk';
-  return 'critical';
-}
-
-// A goal made of several weighted sub-metrics (some daily, some weekly).
-// Weights are renormalized across whichever metrics actually have data,
-// so a goal isn't penalized just because one input hasn't started logging.
-async function computeCompositeGoal(goalId, metrics) {
-  const results = await Promise.all(metrics.map(async m => {
-    const stats = m.cadence === 'weekly'
-      ? await calcWeeklyMetricStats(m.table, m.item, m.weeksBack || 4)
-      : await calcDailyMetricStats(m.table, m.item, { capPerWeek: m.capPerWeek });
-    return { ...m, stats };
-  }));
-
-  const active = results.filter(r => r.stats.hasAnyData);
-  if (active.length === 0) {
-    return { id: goalId, score: 0, trend: 'no_data', status: 'no_data', insight: `No data logged yet for ${metrics.map(m => m.label).join(', ')} — check the boxes and this will start tracking automatically.` };
-  }
-
-  const weightSum = active.reduce((s, r) => s + r.weight, 0);
-  const score = Math.round(active.reduce((s, r) => s + r.stats.score * (r.weight / weightSum), 0));
-
-  const ups = active.filter(r => r.stats.trend === 'up').length;
-  const downs = active.filter(r => r.stats.trend === 'down').length;
-  const trend = ups > downs ? 'up' : downs > ups ? 'down' : 'stable';
-
-  const parts = results.map(r => {
-    if (!r.stats.hasAnyData) return `${r.label}: no data`;
-    if (r.cadence === 'weekly') return `${r.label}: ${r.stats.attendedCount}/${r.stats.weeksBack} weeks`;
-    return `${r.label}: ${r.stats.last7Count}/7 this week`;
-  });
-  const insight = parts.join(' · ');
-
-  return { id: goalId, score, trend, status: habitStatusFromScore(score, true), insight };
-}
-
-const FAITH_METRICS = [
-  { label: 'Prayer & Bible', table: 'morning_routine_log', item: 'Pray and bible study', cadence: 'daily', weight: 0.5 },
-  { label: 'Service', table: 'consistency_log', item: 'Served or encouraged someone', cadence: 'daily', capPerWeek: 3, weight: 0.25 },
-  { label: 'Church', table: 'weekly_checks', item: 'Attended church this week', cadence: 'weekly', weight: 0.25 },
-];
-
-const FAMILY_METRICS = [
-  { label: 'Intentional Family Time', table: 'consistency_log', item: 'Family time', cadence: 'daily', weight: 1 },
-];
-
-// ============================================
-// GOAL #3 — "Build an Elite Discipline System"
-// This is the meta-goal: it rolls up the discipline signal already being
-// captured elsewhere in the app (trading sessions, fitness sessions) plus
-// the general daily-checklist adherence (morning routine + the systems
-// items in Consistency check — excluding Family Time / Service, which
-// belong to the Faith/Family goals instead).
-// ============================================
-
-// Numeric session score (e.g. trading_sessions.discipline_score, 0-100),
-// averaged over the last 7 / 30 days among days that actually have a
-// session logged (no session ≠ automatic zero — the checklist metrics
-// below already cover raw daily consistency).
-async function calcSessionScoreStats(table, dateField, scoreField, { scale = 1 } = {}) {
-  const todayStr = todayISO();
-  const start30 = addDaysISO(todayStr, -29);
-  const start14 = addDaysISO(todayStr, -13);
-  const start7 = addDaysISO(todayStr, -6);
-
-  const { data } = await sb
-    .from(table)
-    .select(`${dateField}, ${scoreField}`)
-    .gte(dateField, start30)
-    .lte(dateField, todayStr);
-
-  const rows = data || [];
-  const hasAnyData = rows.length > 0;
-  const scoreOf = r => (r[scoreField] || 0) * scale;
-
-  const last7Rows = rows.filter(r => r[dateField] >= start7);
-  const prev7Rows = rows.filter(r => r[dateField] >= start14 && r[dateField] < start7);
-  const avg = (list) => list.length ? list.reduce((s, r) => s + scoreOf(r), 0) / list.length : null;
-
-  const last30Avg = avg(rows);
-  const last7Avg = avg(last7Rows);
-  const prev7Avg = avg(prev7Rows);
-
-  const blendedLast7 = last7Avg != null ? last7Avg : (last30Avg || 0);
-  const score = hasAnyData ? Math.round(0.6 * blendedLast7 + 0.4 * (last30Avg || 0)) : 0;
-
-  let trend = 'stable';
-  if (last7Avg != null && prev7Avg != null) {
-    if (last7Avg > prev7Avg + 5) trend = 'up';
-    else if (last7Avg < prev7Avg - 5) trend = 'down';
-  }
-
-  return { hasAnyData, score, sessionCount: rows.length };
-}
-
-// Average completion rate across a GROUP of checklist items (e.g. the full
-// morning routine) rather than a single item — a day counts partially if
-// only some of the items were checked.
-async function calcChecklistGroupStats(table, itemNames) {
-  const todayStr = todayISO();
-  const startStr = addDaysISO(todayStr, -29);
-
-  const { data } = await sb
-    .from(table)
-    .select('log_date, item_name, completed')
-    .in('item_name', itemNames)
-    .gte('log_date', startStr)
-    .lte('log_date', todayStr);
-
-  const byDate = {};
-  (data || []).forEach(row => {
-    if (!byDate[row.log_date]) byDate[row.log_date] = {};
-    byDate[row.log_date][row.item_name] = !!row.completed;
-  });
-  const hasAnyData = Object.keys(byDate).length > 0;
-
-  const days = [];
-  for (let i = 29; i >= 0; i--) days.push(addDaysISO(todayStr, -i));
-
-  const dayRate = (d) => {
-    const entry = byDate[d];
-    if (!entry) return 0;
-    return itemNames.filter(n => entry[n]).length / itemNames.length;
-  };
-  const avg = (list) => list.reduce((s, d) => s + dayRate(d), 0) / list.length;
-
-  const last30Rate = avg(days);
-  const last7Rate = avg(days.slice(-7));
-
-  const score = hasAnyData ? Math.round((0.6 * last7Rate + 0.4 * last30Rate) * 100) : 0;
-  return { hasAnyData, score };
-}
-
-const CONSISTENCY_SYSTEM_ITEMS = CONSISTENCY_ITEMS.filter(
-  i => i !== 'Family time' && i !== 'Served or encouraged someone'
-);
-
-async function computeDisciplineSystemGoal() {
-  const [trading, fitness, morning, systems] = await Promise.all([
-    calcSessionScoreStats('trading_sessions', 'session_date', 'discipline_score', { scale: 1 }),
-    calcSessionScoreStats('fitness_daily_session', 'session_date', 'discipline_score', { scale: 1.25 }), // raw is out of 80
-    calcChecklistGroupStats('morning_routine_log', MORNING_ROUTINE_ITEMS),
-    calcChecklistGroupStats('consistency_log', CONSISTENCY_SYSTEM_ITEMS),
-  ]);
-
-  const metrics = [
-    { label: 'Trading discipline', weight: 0.35, stats: trading, extra: trading.hasAnyData ? ` (${trading.sessionCount} sessions)` : '' },
-    { label: 'Fitness discipline', weight: 0.35, stats: fitness, extra: fitness.hasAnyData ? ` (${fitness.sessionCount} sessions)` : '' },
-    { label: 'Morning routine', weight: 0.15, stats: morning, extra: '' },
-    { label: 'Daily systems', weight: 0.15, stats: systems, extra: '' },
-  ];
-
-  const active = metrics.filter(m => m.stats.hasAnyData);
-  if (active.length === 0) {
-    return { id: 3, score: 0, trend: 'no_data', status: 'no_data', insight: 'No discipline data logged yet — trading sessions, fitness sessions, and daily checklists all feed this score.' };
-  }
-
-  const weightSum = active.reduce((s, m) => s + m.weight, 0);
-  const score = Math.round(active.reduce((s, m) => s + m.stats.score * (m.weight / weightSum), 0));
-
-  const insight = metrics
-    .map(m => m.stats.hasAnyData ? `${m.label}: ${m.stats.score}%${m.extra}` : `${m.label}: no data`)
-    .join(' · ');
-
-  return { id: 3, score, trend: 'stable', status: habitStatusFromScore(score, true), insight };
-}
-
-async function computeHabitGoal(goalId) {
-  if (goalId === 3) return computeDisciplineSystemGoal();
-  if (goalId === 5) return computeCompositeGoal(5, FAITH_METRICS);
-  if (goalId === 8) return computeCompositeGoal(8, FAMILY_METRICS);
-  return null;
-}
-
-// Merges the deterministic Discipline/Faith/Family scores into an analysis
-// object, overwriting whatever the AI guessed (or filling the slot if it's
-// missing), then recomputes the overall score so the header stays
-// consistent.
-async function mergeHabitGoalsIntoAnalysis(analysis) {
-  const base = analysis || {};
-  const goals = Array.isArray(base.goals) ? [...base.goals] : [];
-
-  const ids = [3, 5, 8];
-  const computed = await Promise.all(ids.map(computeHabitGoal));
-  computed.forEach(g => {
-    if (!g) return;
-    const idx = goals.findIndex(x => x.id === g.id);
-    if (idx >= 0) goals[idx] = g;
-    else goals.push(g);
-  });
-
-  const scored = goals.filter(g => g.status !== 'no_data');
-  const overall_score = scored.length
-    ? Math.round(scored.reduce((s, g) => s + (g.score || 0), 0) / scored.length)
-    : 0;
-
-  return { ...base, goals, overall_score };
-}
-
 async function renderGoalsTab() {
   const container = document.getElementById('tab-content');
-  container.innerHTML = '<p class="loading-text">Loading goals analysis...</p>';
+  container.innerHTML = '<p class="loading-text">Loading goals...</p>';
 
   const user = await requireAuth();
   if (!user) return;
 
-  // Load cached analysis from Supabase
   const { data: cached } = await sb
     .from('goals_analysis_cache')
     .select('*')
@@ -2765,33 +2745,49 @@ async function renderGoalsTab() {
     .limit(1)
     .maybeSingle();
 
+  // Auto-refresh on Sunday after 3pm Eastern (browser local time = Eastern)
+  const shouldAutoRefresh = (() => {
+    if (!cached) return false;
+    const now = new Date();
+    if (now.getDay() !== 0 || now.getHours() < 15) return false;
+    const todayAt3pm = new Date(now);
+    todayAt3pm.setHours(15, 0, 0, 0);
+    return new Date(cached.created_at) < todayAt3pm;
+  })();
+
+  if (shouldAutoRefresh) {
+    triggerGoalsAnalysis('weekly', true);
+    return;
+  }
+
   if (cached?.analysis) {
     const merged = await mergeHabitGoalsIntoAnalysis(cached.analysis);
-    renderGoalsUI(merged, cached.created_at, false);
+    renderGoalsUI(merged, cached.created_at, 'weekly');
   } else {
-    // No AI analysis yet — Faith & Family don't need one, so show those
-    // live while prompting to run the rest.
-    const stub = await mergeHabitGoalsIntoAnalysis({ goals: [], overall_score: 0, weekly_summary: '', top_priority: '' });
-    renderGoalsUI(stub, null, false, { noAiYet: true });
+    container.innerHTML = `
+      <div class="card" style="text-align:center; padding:28px;">
+        <div style="font-size:28px; margin-bottom:10px;">🎯</div>
+        <p style="font-size:14px; font-weight:500; color:var(--text); margin-bottom:6px;">No analysis yet</p>
+        <p style="font-size:12px; color:var(--text4); margin-bottom:16px; line-height:1.6;">Claude will read all your tracking data and write a report for each goal — what's working, what's not, and one concrete action to improve.</p>
+        <button class="btn-secondary" onclick="triggerGoalsAnalysis('weekly', true)">Run first analysis</button>
+      </div>`;
   }
 }
 
-async function triggerGoalsAnalysis(force = false) {
+async function triggerGoalsAnalysis(period = 'weekly', force = false) {
   const container = document.getElementById('tab-content');
   container.innerHTML = `
     <div class="card" style="text-align:center; padding:32px;">
-      <div style="font-size:24px; margin-bottom:12px;">🤖</div>
-      <p style="font-size:14px; font-weight:500; color:var(--text); margin-bottom:6px;">Analyzing your data...</p>
-      <p style="font-size:12px; color:var(--text4);">Claude is reading your trades, habits, fitness, and sleep to score each goal.</p>
+      <div style="font-size:28px; margin-bottom:12px;">🤖</div>
+      <p style="font-size:14px; font-weight:500; color:var(--text); margin-bottom:6px;">Analyzing your ${period} performance...</p>
+      <p style="font-size:12px; color:var(--text4);">Claude is reading your trades, habits, fitness, sleep and writing a report for each goal.</p>
     </div>`;
 
   try {
     const { data: { session } } = await sb.auth.getSession();
     if (!session) throw new Error('Not logged in');
 
-    // Compute goals 3/5/8 client-side first so Claude gets them as ready-made
-    // context instead of re-guessing data it doesn't need to touch.
-    const clientComputedGoals = (await Promise.all([3, 5, 8].map(computeHabitGoal))).filter(Boolean);
+    const clientComputedGoals = await Promise.all([2, 3, 5, 8].map(computeHabitGoal));
 
     const res = await fetch(`${SUPABASE_URL}/functions/v1/analyze-goals`, {
       method: 'POST',
@@ -2800,7 +2796,7 @@ async function triggerGoalsAnalysis(force = false) {
         'Authorization': `Bearer ${session.access_token}`,
         'apikey': SUPABASE_PUBLISHABLE_KEY,
       },
-      body: JSON.stringify({ force, client_computed_goals: clientComputedGoals })
+      body: JSON.stringify({ force, period, client_computed_goals: clientComputedGoals })
     });
 
     if (!res.ok) {
@@ -2809,104 +2805,119 @@ async function triggerGoalsAnalysis(force = false) {
     }
 
     const { analysis, cached_at } = await res.json();
-    const merged = await mergeHabitGoalsIntoAnalysis(analysis);
-    renderGoalsUI(merged, cached_at, true);
+    renderGoalsUI(analysis, cached_at, period);
 
   } catch (err) {
     container.innerHTML = `
       <div class="card">
         <p class="card-title" style="color:var(--red);">Analysis failed</p>
         <p class="empty-state">${escapeHtml(err.message)}</p>
-        <button class="btn-secondary" style="margin-top:10px;" onclick="triggerGoalsAnalysis(true)">Retry</button>
+        <button class="btn-secondary" style="margin-top:10px;" onclick="triggerGoalsAnalysis('weekly', true)">Retry</button>
       </div>`;
   }
 }
 
-function renderGoalsUI(analysis, cachedAt, freshlyLoaded, opts = {}) {
-  const { noAiYet = false } = opts;
+function renderGoalsUI(analysis, cachedAt, period = 'weekly') {
   const container = document.getElementById('tab-content');
   if (!container || !analysis) return;
 
-  const { goals = [], overall_score = 0, weekly_summary = '', top_priority = '' } = analysis;
+  window._lastGoalsAnalysis = analysis;
+  window._lastGoalsCachedAt = cachedAt;
 
-  const scoreColor = overall_score >= 70 ? 'var(--green)' : overall_score >= 40 ? 'var(--amber)' : 'var(--red)';
+  const { goals = [], overall_score = 0, summary = '', top_priority = '' } = analysis;
+
+  const sc = s => s >= 70 ? 'var(--green)' : s >= 40 ? 'var(--amber)' : s > 0 ? 'var(--red)' : 'var(--text4)';
   const onTrack = goals.filter(g => g.status === 'on_track').length;
-  const atRisk = goals.filter(g => g.status === 'at_risk' || g.status === 'critical').length;
-  const noData = goals.filter(g => g.status === 'no_data').length;
-
+  const atRisk  = goals.filter(g => g.status === 'at_risk' || g.status === 'critical').length;
   const cachedLabel = cachedAt
-    ? `Last updated ${new Date(cachedAt).toLocaleString()}`
-    : 'Just updated';
+    ? new Date(cachedAt).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+    : 'Just now';
 
-  const goalCards = GOALS_META.map(meta => {
-    const g = goals.find(x => x.id === meta.id) || { score: 0, trend: 'no_data', status: 'no_data', insight: 'No data available yet.' };
+  const goalRow = (meta) => {
+    const g = goals.find(x => x.id === meta.id);
+    const hasData = g && g.status !== 'no_data';
     const pri = PRIORITY_STYLE[meta.priority] || PRIORITY_STYLE.support;
-    const stat = STATUS_STYLE[g.status] || STATUS_STYLE.no_data;
-    const scoreCol = g.score >= 70 ? 'var(--green)' : g.score >= 40 ? 'var(--amber)' : g.status === 'no_data' ? 'var(--text4)' : 'var(--red)';
-    const trend = TREND_ICON[g.trend] || '—';
-    const trendCol = g.trend === 'up' ? 'var(--green)' : g.trend === 'down' ? 'var(--red)' : 'var(--text4)';
+    const stat = g ? (STATUS_STYLE[g.status] || STATUS_STYLE.no_data) : STATUS_STYLE.no_data;
+    const score = g?.score || 0;
+    const trend = TREND_ICON[g?.trend] || '—';
+    const trendCol = g?.trend === 'up' ? 'var(--green)' : g?.trend === 'down' ? 'var(--red)' : 'var(--text4)';
 
     return `
-      <div class="card" style="border-left: 2px solid ${pri.color}; margin-bottom:8px;">
-        <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:8px;">
+      <div style="padding:12px 0; border-bottom:0.5px solid var(--border2);">
+        <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:${hasData ? '8px' : '0'};">
           <div style="flex:1;">
-            <div style="font-size:13px; font-weight:500; color:var(--text); margin-bottom:4px;">${escapeHtml(meta.name)}</div>
-            <div style="display:flex; align-items:center; gap:8px;">
-              <span style="font-size:10px; font-weight:500; padding:2px 7px; border-radius:5px; background:${pri.bg}; color:${pri.color};">${pri.label}</span>
+            <div style="display:flex; align-items:center; gap:6px; margin-bottom:4px;">
+              <span style="font-size:10px; font-weight:500; padding:2px 6px; border-radius:4px; background:${pri.bg}; color:${pri.color};">${pri.label}</span>
               <span style="font-size:11px; color:${stat.color}; font-weight:500;">${stat.label}</span>
             </div>
+            <div style="font-size:13px; font-weight:500; color:var(--text);">${escapeHtml(meta.name)}</div>
           </div>
           <div style="text-align:right; flex-shrink:0;">
-            <div style="font-size:22px; font-weight:500; color:${scoreCol}; line-height:1;">${g.status === 'no_data' ? '—' : g.score + '%'}</div>
-            <div style="font-size:13px; color:${trendCol}; font-weight:500;">${trend}</div>
+            <div style="font-size:24px; font-weight:500; color:${sc(score)}; line-height:1;">${hasData ? score + '%' : '—'}</div>
+            <div style="font-size:12px; color:${trendCol}; font-weight:500;">${trend}</div>
           </div>
         </div>
-        ${g.status !== 'no_data' ? `
-          <div class="progress-track" style="margin-bottom:8px;">
-            <div class="progress-fill" style="width:${g.score}%; background:${scoreCol};"></div>
-          </div>` : ''}
-        <div style="font-size:12px; color:var(--text3); line-height:1.6; font-style:italic;">"${escapeHtml(g.insight)}"</div>
+        ${hasData ? `
+          <div class="progress-track" style="margin-bottom:10px;">
+            <div class="progress-fill" style="width:${score}%; background:${sc(score)};"></div>
+          </div>
+          ${g.what_working ? `<div style="margin-bottom:6px;"><span style="font-size:10px;font-weight:500;color:var(--green);text-transform:uppercase;letter-spacing:.05em;">✓ Working</span><div style="font-size:12px;color:var(--text3);margin-top:2px;line-height:1.5;">${escapeHtml(g.what_working)}</div></div>` : ''}
+          ${g.what_not ? `<div style="margin-bottom:6px;"><span style="font-size:10px;font-weight:500;color:var(--red);text-transform:uppercase;letter-spacing:.05em;">✗ Not working</span><div style="font-size:12px;color:var(--text3);margin-top:2px;line-height:1.5;">${escapeHtml(g.what_not)}</div></div>` : ''}
+          ${g.improve ? `<div><span style="font-size:10px;font-weight:500;color:var(--amber);text-transform:uppercase;letter-spacing:.05em;">→ Improve this ${period === 'monthly' ? 'month' : 'week'}</span><div style="font-size:12px;color:var(--text3);margin-top:2px;line-height:1.5;">${escapeHtml(g.improve)}</div></div>` : g.insight ? `<div style="font-size:12px;color:var(--text3);font-style:italic;line-height:1.5;">"${escapeHtml(g.insight)}"</div>` : ''}
+        ` : '<div style="font-size:12px;color:var(--text4);">No data logged yet.</div>'}
       </div>`;
-  }).join('');
+  };
+
+  const section = (icon, label, ids) => `
+    <div class="card" style="margin-bottom:10px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+        <span style="font-size:14px;">${icon}</span>
+        <span style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.08em;color:var(--text4);">${label}</span>
+      </div>
+      ${GOALS_META.filter(m => ids.includes(m.id)).map(goalRow).join('')}
+    </div>`;
 
   container.innerHTML = `
-    <!-- Header summary -->
     <div class="card" style="margin-bottom:10px;">
-      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
         <div>
-          <p style="font-size:10px; font-weight:500; text-transform:uppercase; letter-spacing:.08em; color:var(--text3); margin-bottom:4px;">Overall score — 2026 goals</p>
-          <div style="font-size:36px; font-weight:500; color:${scoreColor}; line-height:1;">${overall_score}<span style="font-size:16px; color:var(--text4);">%</span></div>
+          <div style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.08em;color:var(--text3);margin-bottom:4px;">2026 Goals — Overall</div>
+          <div style="font-size:36px;font-weight:500;color:${sc(overall_score)};line-height:1;">${overall_score}<span style="font-size:16px;color:var(--text4);">%</span></div>
         </div>
         <div style="text-align:right;">
-          <div class="stat-grid-3" style="gap:8px; margin-bottom:8px;">
-            <div class="stat-box"><div class="stat-box-value g">${onTrack}</div><div class="stat-box-label">On track</div></div>
-            <div class="stat-box"><div class="stat-box-value ${atRisk > 0 ? 'a' : 'dim'}">${atRisk}</div><div class="stat-box-label">At risk</div></div>
-            <div class="stat-box"><div class="stat-box-value dim">${noData}</div><div class="stat-box-label">No data</div></div>
+          <div style="display:flex;gap:4px;margin-bottom:8px;">
+            <button onclick="renderGoalsUI(window._lastGoalsAnalysis,window._lastGoalsCachedAt,'weekly')"
+              style="font-size:11px;padding:4px 12px;border-radius:6px;cursor:pointer;border:0.5px solid ${period==='weekly'?'var(--purple)':'var(--border)'};background:${period==='weekly'?'var(--purple)':'var(--bg2)'};color:${period==='weekly'?'#EEEDFE':'var(--text4)'};">
+              This week
+            </button>
+            <button onclick="triggerGoalsAnalysis('monthly',false)"
+              style="font-size:11px;padding:4px 12px;border-radius:6px;cursor:pointer;border:0.5px solid ${period==='monthly'?'var(--purple)':'var(--border)'};background:${period==='monthly'?'var(--purple)':'var(--bg2)'};color:${period==='monthly'?'#EEEDFE':'var(--text4)'};">
+              This month
+            </button>
           </div>
-          ${noAiYet
-            ? `<button class="btn-secondary" onclick="triggerGoalsAnalysis(false)" style="font-size:11px; padding:5px 12px;">Run first analysis ↗</button>`
-            : `<button class="btn-secondary" onclick="triggerGoalsAnalysis(true)" style="font-size:11px; padding:5px 12px;">🔄 Refresh analysis</button>`
-          }
+          <div class="stat-grid-3" style="gap:6px;margin-bottom:8px;">
+            <div class="stat-box"><div class="stat-box-value g">${onTrack}</div><div class="stat-box-label">On track</div></div>
+            <div class="stat-box"><div class="stat-box-value ${atRisk>0?'a':'dim'}">${atRisk}</div><div class="stat-box-label">At risk</div></div>
+            <div class="stat-box"><div class="stat-box-value dim">${6-onTrack-atRisk}</div><div class="stat-box-label">No data</div></div>
+          </div>
+          <button class="btn-secondary" onclick="triggerGoalsAnalysis('${period}',true)" style="font-size:11px;padding:4px 12px;">🔄 Refresh</button>
         </div>
       </div>
-      ${noAiYet ? `
-      <div style="background:var(--purple-bg); border-left:2px solid var(--purple); border-radius:0 8px 8px 0; padding:10px 14px;">
-        <p style="font-size:12px; color:var(--purple-light); line-height:1.7;">Faith &amp; Family are tracked live below from your daily check-ins — no AI needed for those. Run analysis to score the rest (trading, fitness, brand, and so on).</p>
-      </div>` : `
-      <div style="background:var(--purple-bg); border-left:2px solid var(--purple); border-radius:0 8px 8px 0; padding:10px 14px; margin-bottom:10px;">
-        <p style="font-size:11px; font-weight:500; color:var(--text4); text-transform:uppercase; letter-spacing:.06em; margin-bottom:4px;">Weekly summary</p>
-        <p style="font-size:12px; color:var(--purple-light); line-height:1.7; font-style:italic;">${escapeHtml(weekly_summary)}</p>
-      </div>
-      <div style="background:var(--amber-bg); border:0.5px solid var(--amber-border); border-radius:8px; padding:10px 14px;">
-        <p style="font-size:11px; font-weight:500; color:var(--text4); text-transform:uppercase; letter-spacing:.06em; margin-bottom:4px;">Top priority this week</p>
-        <p style="font-size:13px; color:var(--amber); font-weight:500;">${escapeHtml(top_priority)}</p>
-      </div>
-      <p style="font-size:10px; color:var(--text4); margin-top:10px; text-align:right;">${cachedLabel}</p>
-      `}
+      ${summary ? `<div style="background:var(--purple-bg);border-left:2px solid var(--purple);border-radius:0 8px 8px 0;padding:10px 14px;margin-bottom:10px;">
+        <p style="font-size:10px;font-weight:500;color:var(--text4);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">${period==='monthly'?'Monthly':'Weekly'} summary</p>
+        <p style="font-size:12px;color:var(--purple-light);line-height:1.7;">${escapeHtml(summary)}</p>
+      </div>` : ''}
+      ${top_priority ? `<div style="background:var(--amber-bg);border:0.5px solid var(--amber-border);border-radius:8px;padding:10px 14px;">
+        <p style="font-size:10px;font-weight:500;color:var(--text4);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Top priority this week</p>
+        <p style="font-size:13px;color:var(--amber);font-weight:500;">${escapeHtml(top_priority)}</p>
+      </div>` : ''}
+      <p style="font-size:10px;color:var(--text4);margin-top:8px;text-align:right;">Last updated: ${cachedLabel}</p>
     </div>
-
-    <!-- Individual goal cards -->
-    ${goalCards}
+    ${section('📈','Trading',[1,2])}
+    ${section('⚙️','Discipline System',[3])}
+    ${section('💪','Fitness',[4])}
+    ${section('🙏','Faith',[5])}
+    ${section('👨‍👩‍👧','Family',[8])}
   `;
 }
 
