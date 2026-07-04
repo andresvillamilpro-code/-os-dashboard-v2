@@ -2877,6 +2877,11 @@ function renderGoalsUI(analysis, cachedAt, period = 'weekly') {
       ${GOALS_META.filter(m => ids.includes(m.id)).map(goalRow).join('')}
     </div>`;
 
+  const mon = getMondayOfWeek();
+  const sun = new Date(mon); sun.setDate(sun.getDate() + 6);
+  const weekLabel = `${mon.toLocaleDateString('en-US',{month:'short',day:'numeric'})} – ${sun.toLocaleDateString('en-US',{month:'short',day:'numeric'})}`;
+  const monthLabel = new Date().toLocaleDateString('en-US',{month:'long',year:'numeric'});
+
   container.innerHTML = `
     <div class="card" style="margin-bottom:10px;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
@@ -2885,7 +2890,7 @@ function renderGoalsUI(analysis, cachedAt, period = 'weekly') {
           <div style="font-size:36px;font-weight:500;color:${sc(overall_score)};line-height:1;">${overall_score}<span style="font-size:16px;color:var(--text4);">%</span></div>
         </div>
         <div style="text-align:right;">
-          <div style="display:flex;gap:4px;margin-bottom:8px;">
+          <div style="display:flex;gap:4px;margin-bottom:4px;">
             <button onclick="renderGoalsUI(window._lastGoalsAnalysis,window._lastGoalsCachedAt,'weekly')"
               style="font-size:11px;padding:4px 12px;border-radius:6px;cursor:pointer;border:0.5px solid ${period==='weekly'?'var(--purple)':'var(--border)'};background:${period==='weekly'?'var(--purple)':'var(--bg2)'};color:${period==='weekly'?'#EEEDFE':'var(--text4)'};">
               This week
@@ -2895,6 +2900,7 @@ function renderGoalsUI(analysis, cachedAt, period = 'weekly') {
               This month
             </button>
           </div>
+          <div style="font-size:10px;color:var(--text4);text-align:right;margin-bottom:8px;">${period==='weekly' ? weekLabel : monthLabel}</div>
           <div class="stat-grid-3" style="gap:6px;margin-bottom:8px;">
             <div class="stat-box"><div class="stat-box-value g">${onTrack}</div><div class="stat-box-label">On track</div></div>
             <div class="stat-box"><div class="stat-box-value ${atRisk>0?'a':'dim'}">${atRisk}</div><div class="stat-box-label">At risk</div></div>
