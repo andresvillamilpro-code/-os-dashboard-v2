@@ -52,6 +52,7 @@ const CONSISTENCY_ITEMS = [
   'Creatine',
   'Zinc',
   'Magnesium',
+  '7h+ sleep',
   'Gym',
   'Family time',
   '20 pages reading'
@@ -1728,7 +1729,7 @@ async function renderFitnessTab() {
     muscleThis,
     cardioThis,
     strength,
-    sleepRows,
+    sleepConsistency,
     weightThis,
     supplementsToday,
     photoRows,
@@ -1738,7 +1739,8 @@ async function renderFitnessTab() {
     safeQuery(sb.from('fitness_muscle_log').select('*').eq('week_start', thisWeek)),
     safeQuery(sb.from('fitness_cardio_log').select('*').eq('week_start', thisWeek)),
     safeQuery(sb.from('fitness_strength').select('*').order('logged_at', { ascending: false })),
-    safeQuery(sb.from('fitness_sleep_log').select('*').gte('log_date', thisWeek).lte('log_date', thisWeekDates[6])),
+    // Sleep now lives in consistency_log (synced with Daily tab)
+    safeQuery(sb.from('consistency_log').select('log_date, completed').eq('item_name', '7h+ sleep').gte('log_date', thisWeek).lte('log_date', thisWeekDates[6])),
     safeQuery(sb.from('fitness_weight_log').select('*').eq('week_start', thisWeek).limit(1)),
     safeQuery(sb.from('consistency_log').select('*').eq('log_date', today)),
     safeQuery(sb.from('fitness_photos').select('*').eq('week_start', thisWeek)),
@@ -1754,7 +1756,8 @@ async function renderFitnessTab() {
   // ── This week live stats (always reflect current state) ──
   const thisTrainingDays = new Set(muscleThis.filter(r => r.trained).map(r => r.day_date));
   const thisCardioDays   = new Set(cardioThis.filter(r => r.done).map(r => r.day_date));
-  const thisSleep7Count  = sleepRows.filter(r => r.slept_7plus).length;
+  // Sleep count from consistency_log — same data as Daily tab
+  const thisSleep7Count  = sleepConsistency.filter(r => r.completed).length;
   const currentWeight    = weightThis[0]?.weight_lbs;
 
   // ── This week maps (for grids — individual checkboxes) ──
@@ -1763,9 +1766,6 @@ async function renderFitnessTab() {
 
   const cardioMap = {};
   cardioThis.forEach(r => { cardioMap[`${r.cardio_type}-${r.day_date}`] = r.done; });
-
-  const sleepMap = {};
-  sleepRows.forEach(r => { sleepMap[r.log_date] = r.slept_7plus; });
 
   // ── Strength: latest per lift ──
   const strengthMap = {};
@@ -1892,7 +1892,7 @@ async function renderFitnessTab() {
       </div>
       <div class="card">
         <p class="card-title">Weight &amp; sleep</p>
-        ${renderWeightSleepCard(currentWeight, sleepMap, thisWeekDates)}
+        ${renderWeightSleepCard(currentWeight, sleepConsistency, thisWeekDates)}
       </div>
     </div>
 
@@ -2018,8 +2018,11 @@ function renderStrengthTable(strengthMap) {
   return rows;
 }
 
-function renderWeightSleepCard(currentWeight, sleepMap, dates) {
-  const sleepDots = dates.map((dateStr, i) => {
+function renderWeightSleepCard(currentWeight, sleepConsistency = [], thisWeekDates = []) {
+  const sleepMap = {};
+  sleepConsistency.forEach(r => { sleepMap[r.log_date] = r.completed; });
+
+  const sleepDots = thisWeekDates.map((dateStr, i) => {
     const slept = sleepMap[dateStr] || false;
     return `<div style="text-align:center;">
       <input type="checkbox" data-sleep-date="${dateStr}" ${slept ? 'checked' : ''}
@@ -2038,10 +2041,11 @@ function renderWeightSleepCard(currentWeight, sleepMap, dates) {
       </div>
       <div style="font-size:10px;color:var(--text4);margin-top:4px;">Goal: ${WEIGHT_GOAL_LBS} lb</div>
     </div>
+    ${thisWeekDates.length ? `
     <div>
-      <div style="font-size:11px;color:var(--text3);margin-bottom:8px;">7h+ sleep this week</div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:8px;">7h+ sleep this week <span style="font-size:10px;color:var(--text4);">— synced with Daily</span></div>
       <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;">${sleepDots}</div>
-    </div>`;
+    </div>` : ''}`;
 }
 
 function renderPhotoSlot(type, photo) {
@@ -2117,7 +2121,8 @@ async function saveLiftUpdate() {
   renderFitnessTab();
 }
 
-function attachWeightSleepHandlers(weekStart, dates) {
+function attachWeightSleepHandlers(weekStart) {
+  // Weight handler
   const weightInput = document.getElementById('weight-input');
   if (weightInput) {
     let debounce;
@@ -2136,15 +2141,21 @@ function attachWeightSleepHandlers(weekStart, dates) {
     });
   }
 
+  // Sleep handler — writes to consistency_log (same table as Daily tab)
+  // Checking here instantly reflects in the Daily tab and vice versa
   document.querySelectorAll('input[data-sleep-date]').forEach(cb => {
     cb.addEventListener('change', async (e) => {
       const log_date = e.target.dataset.sleepDate;
-      const slept_7plus = e.target.checked;
-      const { data: existing } = await sb.from('fitness_sleep_log').select('id').eq('log_date', log_date).maybeSingle();
+      const completed = e.target.checked;
+      const { data: existing } = await sb.from('consistency_log').select('id')
+        .eq('log_date', log_date).eq('item_name', '7h+ sleep').maybeSingle();
       if (existing) {
-        await sb.from('fitness_sleep_log').update({ slept_7plus }).eq('id', existing.id);
+        await sb.from('consistency_log').update({ completed }).eq('id', existing.id);
       } else {
-        await sb.from('fitness_sleep_log').insert({ log_date, slept_7plus, user_id: (await sb.auth.getUser()).data.user?.id });
+        await sb.from('consistency_log').insert({
+          log_date, item_name: '7h+ sleep', completed,
+          user_id: (await sb.auth.getUser()).data.user?.id
+        });
       }
     });
   });
@@ -2193,13 +2204,14 @@ async function maybeLockWeekSnapshot() {
   const [muscleRows, cardioRows, sleepRows, weightRow] = await Promise.all([
     safeQuery(sb.from('fitness_muscle_log').select('*').eq('week_start', thisWeek)),
     safeQuery(sb.from('fitness_cardio_log').select('*').eq('week_start', thisWeek)),
-    safeQuery(sb.from('fitness_sleep_log').select('*').gte('log_date', thisWeek).lte('log_date', thisWeekDates[6])),
+    // Sleep now lives in consistency_log (synced with Daily tab)
+    safeQuery(sb.from('consistency_log').select('log_date, completed').eq('item_name', '7h+ sleep').gte('log_date', thisWeek).lte('log_date', thisWeekDates[6])),
     safeQuery(sb.from('fitness_weight_log').select('*').eq('week_start', thisWeek).limit(1))
   ]);
 
   const trainingDays = new Set(muscleRows.filter(r => r.trained).map(r => r.day_date)).size;
   const cardioDays   = new Set(cardioRows.filter(r => r.done).map(r => r.day_date)).size;
-  const sleep7Days   = sleepRows.filter(r => r.slept_7plus).length;
+  const sleep7Days   = sleepRows.filter(r => r.completed).length;
   const weight       = weightRow[0]?.weight_lbs ?? null;
 
   const { data: { user } } = await sb.auth.getUser();
