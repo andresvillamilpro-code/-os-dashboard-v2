@@ -1948,14 +1948,13 @@ async function renderFitnessTab() {
     <div class="card">
       <div class="card-header">
         <p class="card-title" style="margin-bottom:0;">Log today's session</p>
-        ${todayFitnessSession ? `<span style="font-size:11px;font-weight:500;color:var(--green);">✅ Logged — ${Math.round((todayFitnessSession.discipline_score||0)/80*100)}%</span>` : '<span class="card-meta">Not logged yet</span>'}
+        ${todayFitnessSession ? `<span style="font-size:11px;font-weight:500;color:var(--green);">✅ Logged — ${Math.round((todayFitnessSession.discipline_score||0)/FITNESS_DAILY_MAX*100)}%</span>` : '<span class="card-meta">Not logged yet</span>'}
       </div>
       <form id="fitness-session-form">
         ${[
           { key: 'workout_done',   label: 'Workout completed as planned', weight: 25 },
           { key: 'protein_done',   label: 'Protein target reached',       weight: 20 },
           { key: 'nutrition_done', label: 'Nutrition followed',            weight: 20 },
-          { key: 'sleep_done',     label: '7h+ sleep',                    weight: 15 },
         ].map(f => `
           <div class="check-row">
             <input type="checkbox" name="${f.key}" ${todayFitnessSession?.[f.key] ? 'checked' : ''} />
@@ -2326,25 +2325,28 @@ async function maybeLockWeekSnapshot() {
 // FITNESS DISCIPLINE & PERFORMANCE
 // ============================================
 
-// Daily weights (out of 80 pts — progressive overload adds 20 weekly)
+// Daily weights — sleep dropped from here since it's already tracked in
+// the Daily tab consistency check + the Weight & Sleep weekly grid;
+// keeping it here too was redundant triple-logging of the same thing.
 const FITNESS_DAILY_WEIGHTS = {
   workout_done:  25,
   protein_done:  20,
   nutrition_done:20,
-  sleep_done:    15,
 };
+const FITNESS_DAILY_MAX = Object.values(FITNESS_DAILY_WEIGHTS).reduce((a, b) => a + b, 0); // 65
 
 function calcFitnessDailyScore(session) {
   let score = 0;
   for (const [key, weight] of Object.entries(FITNESS_DAILY_WEIGHTS)) {
     if (session[key]) score += weight;
   }
-  return score; // max 80
+  return score; // max FITNESS_DAILY_MAX
 }
 
-function calcFitnessWeeklyScore(avgDailyRaw, progressiveOverload) {
-  // avg daily raw score (0-80) + progressive overload (0-20) = 0-100
-  return Math.round(avgDailyRaw + (progressiveOverload ? 20 : 0));
+function calcFitnessWeeklyScore(avgDailyPct, progressiveOverload) {
+  // Daily habit compliance counts for 80% of the weekly score,
+  // progressive overload adds up to the remaining 20%.
+  return Math.round(avgDailyPct * 0.8 + (progressiveOverload ? 20 : 0));
 }
 
 async function loadAndRenderFitnessDiscipline(thisWeek) {
@@ -2363,12 +2365,13 @@ async function loadAndRenderFitnessDiscipline(thisWeek) {
   const avgDailyRaw = last30Sessions.length
     ? last30Sessions.reduce((s, r) => s + (r.discipline_score || 0), 0) / last30Sessions.length
     : 0;
+  const avgDailyPct = last30Sessions.length ? Math.round(avgDailyRaw / FITNESS_DAILY_MAX * 100) : 0;
 
   const weekData = await safeQuery(
     sb.from('fitness_weight_log').select('progressive_overload').eq('week_start', thisWeek).limit(1)
   );
   const progressiveOverload = weekData[0]?.progressive_overload || false;
-  const weeklyScore = calcFitnessWeeklyScore(avgDailyRaw, progressiveOverload);
+  const weeklyScore = calcFitnessWeeklyScore(avgDailyPct, progressiveOverload);
 
   const compliance = (key) => last30Sessions.length
     ? Math.round(last30Sessions.filter(s => s[key]).length / last30Sessions.length * 100)
@@ -2391,7 +2394,7 @@ async function loadAndRenderFitnessDiscipline(thisWeek) {
         <div style="font-size:10px;color:var(--text4);margin-top:4px;">daily avg + overload</div>
       </div>
       <div class="card stat-box">
-        <div class="stat-box-value" style="color:${scoreColor(Math.round(avgDailyRaw/80*100))};">${last30Sessions.length ? Math.round(avgDailyRaw/80*100)+'%' : '—'}</div>
+        <div class="stat-box-value" style="color:${scoreColor(avgDailyPct)};">${last30Sessions.length ? avgDailyPct + '%' : '—'}</div>
         <div class="stat-box-label">Daily discipline</div>
         <div style="font-size:10px;color:var(--text4);margin-top:4px;">avg last 30 days</div>
       </div>
@@ -2409,7 +2412,6 @@ async function loadAndRenderFitnessDiscipline(thisWeek) {
         { label: 'Workout completed', key: 'workout_done', weight: 25 },
         { label: 'Protein target reached', key: 'protein_done', weight: 20 },
         { label: 'Nutrition followed', key: 'nutrition_done', weight: 20 },
-        { label: '7h+ sleep', key: 'sleep_done', weight: 15 },
       ].map(c => {
         const pct = compliance(c.key);
         return `<div style="margin-bottom:8px;">
@@ -2468,7 +2470,7 @@ function updateFitnessScorePreview() {
     session[key] = form.querySelector(`input[name="${key}"]`)?.checked || false;
   }
   const raw = calcFitnessDailyScore(session);
-  const pct = Math.round(raw / 80 * 100);
+  const pct = Math.round(raw / FITNESS_DAILY_MAX * 100);
   const el = document.getElementById('fitness-score-preview');
   if (el) {
     const col = pct >= 80 ? 'var(--green)' : pct >= 60 ? 'var(--amber)' : 'var(--red)';
@@ -2750,7 +2752,7 @@ async function computeDisciplineSystemGoal() {
   const consistencySystemItems = await getDisciplineSystemConsistencyItems();
   const [trading, fitness, morning, systems] = await Promise.all([
     calcSessionScoreStats('trading_sessions', 'session_date', 'discipline_score'),
-    calcSessionScoreStats('fitness_daily_session', 'session_date', 'discipline_score', { scale: 100 / 80 }),
+    calcSessionScoreStats('fitness_daily_session', 'session_date', 'discipline_score', { scale: 100 / FITNESS_DAILY_MAX }),
     calcChecklistGroupStats('morning_routine_log', MORNING_ROUTINE_ITEMS),
     consistencySystemItems.length
       ? calcChecklistGroupStats('consistency_log', consistencySystemItems)
