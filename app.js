@@ -46,17 +46,56 @@ const MORNING_ROUTINE_ITEMS = [
   '1 glass of water'
 ];
 
-const CONSISTENCY_ITEMS = [
-  '2L water',
-  '160g protein',
-  'Creatine',
-  'Zinc',
-  'Magnesium',
-  '7h+ sleep',
-  'Gym',
-  'Family time',
-  '20 pages reading'
-];
+// Consistency items are now dynamic — stored in the `consistency_items` table
+// (item_name, is_system, active, sort_order) instead of hardcoded here.
+// The 9 original items were seeded as is_system = true (protected, can't be
+// deleted). Anything added later is is_system = false and deletable.
+// consistencyItemsCache holds the last-loaded rows: [{ item_name, is_system }]
+let consistencyItemsCache = null;
+
+async function loadConsistencyItems() {
+  const { data } = await sb.from('consistency_items')
+    .select('item_name, is_system')
+    .eq('active', true)
+    .order('sort_order', { ascending: true })
+    .order('created_at', { ascending: true });
+  consistencyItemsCache = data && data.length ? data : [];
+  return consistencyItemsCache;
+}
+
+async function loadActiveConsistencyItemNames() {
+  const rows = consistencyItemsCache || await loadConsistencyItems();
+  return rows.map(r => r.item_name);
+}
+
+async function addConsistencyItem(name) {
+  const trimmed = (name || '').trim();
+  if (!trimmed) return { ok: false, error: 'Enter a habit name' };
+  const existing = consistencyItemsCache || await loadConsistencyItems();
+  if (existing.some(r => r.item_name.toLowerCase() === trimmed.toLowerCase())) {
+    return { ok: false, error: 'That habit already exists' };
+  }
+  const user = (await sb.auth.getUser()).data.user;
+  const { error } = await sb.from('consistency_items').insert({
+    item_name: trimmed,
+    is_system: false,
+    active: true,
+    sort_order: existing.length,
+    user_id: user?.id
+  });
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
+
+async function deleteConsistencyItem(itemName) {
+  const { error } = await sb.from('consistency_items')
+    .update({ active: false })
+    .eq('item_name', itemName)
+    .eq('active', true)
+    .eq('is_system', false); // belt-and-suspenders — system items never deletable client-side either
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
 
 // ============================================
 // AUTH HELPERS
@@ -190,10 +229,13 @@ async function renderDailyTab() {
 
   const today = todayISO();
 
+  const consistencyItems = await loadConsistencyItems();
+  const consistencyItemNames = consistencyItems.map(r => r.item_name);
+
   const [snapshot, routine, consistency, goals, tasks] = await Promise.all([
     loadTradingSnapshot(),
     loadChecklist('morning_routine_log', MORNING_ROUTINE_ITEMS, today),
-    loadChecklist('consistency_log', CONSISTENCY_ITEMS, today),
+    loadChecklist('consistency_log', consistencyItemNames, today),
     loadTopGoals(today),
     loadTasks()
   ]);
@@ -206,12 +248,13 @@ async function renderDailyTab() {
       ${renderTopGoalsCard(goals)}
       ${renderTaskListCard(tasks)}
     </div>
-    ${renderChecklistCard('Consistency check', 'consistency', consistency)}
+    ${renderEditableChecklistCard('Consistency check', 'consistency', consistency, consistencyItems)}
     ${renderTradingSnapshotBox(snapshot)}
   `;
 
-  attachChecklistHandlers('morning_routine_log', 'morning-routine');
-  attachChecklistHandlers('consistency_log', 'consistency');
+  attachChecklistHandlers('morning_routine_log', 'morning-routine', MORNING_ROUTINE_ITEMS);
+  attachChecklistHandlers('consistency_log', 'consistency', consistencyItemNames);
+  attachConsistencyEditHandlers();
   attachTopGoalsHandlers();
   attachTaskListHandlers();
   initGoogleCalendar();
@@ -347,8 +390,7 @@ function renderChecklistCard(title, idPrefix, rows) {
   `;
 }
 
-function attachChecklistHandlers(table, idPrefix) {
-  const items = table === 'morning_routine_log' ? MORNING_ROUTINE_ITEMS : CONSISTENCY_ITEMS;
+function attachChecklistHandlers(table, idPrefix, items) {
   const list = document.getElementById(`${idPrefix}-list`);
   if (!list) return;
   list.querySelectorAll('input[type="checkbox"]').forEach(cb => {
@@ -370,6 +412,62 @@ function attachChecklistHandlers(table, idPrefix) {
       } else {
         await sb.from(table).insert({ log_date: today, item_name: itemName, completed, user_id: (await sb.auth.getUser()).data.user?.id });
       }
+    });
+  });
+}
+
+// ---------- Consistency check (editable — add/delete custom habits) ----------
+
+function renderEditableChecklistCard(title, idPrefix, rows, itemMeta) {
+  const isSystemByName = {};
+  (itemMeta || []).forEach(m => { isSystemByName[m.item_name] = m.is_system; });
+  return `
+    <div class="card">
+      <p class="card-title">${title}</p>
+      <div id="${idPrefix}-list">
+        ${rows.map((r, i) => `
+          <div class="check-row" data-item-name="${escapeHtml(r.item_name)}">
+            <input type="checkbox" data-idx="${i}" ${r.completed ? 'checked' : ''} />
+            <label class="check-label" style="flex:1;">${escapeHtml(r.item_name)}</label>
+            ${isSystemByName[r.item_name] ? '' : `<span class="consistency-delete-btn" data-item-name="${escapeHtml(r.item_name)}" style="cursor:pointer;color:var(--text4);font-size:14px;padding:2px 6px;" title="Remove habit">×</span>`}
+          </div>
+        `).join('')}
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border2);">
+        <input type="text" id="${idPrefix}-new-habit-input" placeholder="Add a habit..." style="flex:1;" />
+        <button type="button" id="${idPrefix}-add-habit-btn" class="btn-secondary">+ Add</button>
+      </div>
+      <div id="${idPrefix}-add-habit-error" style="font-size:11px;color:var(--red);margin-top:6px;"></div>
+    </div>
+  `;
+}
+
+function attachConsistencyEditHandlers() {
+  const addBtn = document.getElementById('consistency-add-habit-btn');
+  const input = document.getElementById('consistency-new-habit-input');
+  const errorEl = document.getElementById('consistency-add-habit-error');
+
+  if (addBtn && input) {
+    const submit = async () => {
+      if (errorEl) errorEl.textContent = '';
+      const result = await addConsistencyItem(input.value);
+      if (!result.ok) {
+        if (errorEl) errorEl.textContent = result.error;
+        return;
+      }
+      renderDailyTab();
+    };
+    addBtn.addEventListener('click', submit);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  }
+
+  document.querySelectorAll('.consistency-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      const itemName = e.target.dataset.itemName;
+      if (!confirm(`Remove "${itemName}" from your consistency list? Past logged history stays intact.`)) return;
+      const result = await deleteConsistencyItem(itemName);
+      if (!result.ok) { alert(result.error); return; }
+      renderDailyTab();
     });
   });
 }
@@ -1838,13 +1936,11 @@ async function renderFitnessTab() {
         <span class="card-meta">Synced with Daily tab</span>
       </div>
       <div id="fitness-supplements-list">
-        ${SUPPLEMENT_ITEMS.map((item) => {
-          const idx = CONSISTENCY_ITEMS.indexOf(item);
-          return `<div class="check-row">
+        ${SUPPLEMENT_ITEMS.map((item, idx) => `
+          <div class="check-row">
             <input type="checkbox" data-idx="${idx}" ${suppMap[item] ? 'checked' : ''} />
             <label class="check-label">${escapeHtml(item)}</label>
-          </div>`;
-        }).join('')}
+          </div>`).join('')}
       </div>
     </div>
 
@@ -1944,7 +2040,7 @@ async function renderFitnessTab() {
   attachCardioGridHandlers(thisWeek);
   attachStrengthHandlers();
   attachWeightSleepHandlers(thisWeek, thisWeekDates);
-  attachChecklistHandlers('consistency_log', 'fitness-supplements');
+  attachChecklistHandlers('consistency_log', 'fitness-supplements', SUPPLEMENT_ITEMS);
   attachPhotoHandlers(thisWeek);
   attachFitnessSessionHandlers(thisWeek, weekData);
   updateFitnessScorePreview();
@@ -2641,18 +2737,24 @@ async function calcChecklistGroupStats(table, itemNames) {
   return { score, trend, hasAnyData };
 }
 
-// Items from consistency_log that feed the Discipline System goal
-const CONSISTENCY_SYSTEM_ITEMS = CONSISTENCY_ITEMS.filter(
-  i => !['Family time', '20 pages reading'].includes(i)
-);
+// Items from consistency_log that feed the Discipline System goal.
+// Pulled live from consistency_items so newly added custom habits are
+// automatically included — only Family time (Goal 8) and reading are excluded.
+async function getDisciplineSystemConsistencyItems() {
+  const names = await loadActiveConsistencyItemNames();
+  return names.filter(n => !['Family time', '20 pages reading'].includes(n));
+}
 
 // Goal 3 — Discipline System (trading + fitness + morning + consistency)
 async function computeDisciplineSystemGoal() {
+  const consistencySystemItems = await getDisciplineSystemConsistencyItems();
   const [trading, fitness, morning, systems] = await Promise.all([
     calcSessionScoreStats('trading_sessions', 'session_date', 'discipline_score'),
     calcSessionScoreStats('fitness_daily_session', 'session_date', 'discipline_score', { scale: 100 / 80 }),
     calcChecklistGroupStats('morning_routine_log', MORNING_ROUTINE_ITEMS),
-    calcChecklistGroupStats('consistency_log', CONSISTENCY_SYSTEM_ITEMS),
+    consistencySystemItems.length
+      ? calcChecklistGroupStats('consistency_log', consistencySystemItems)
+      : Promise.resolve({ score: 0, trend: 'no_data', hasAnyData: false }),
   ]);
   const metrics = [
     { label: 'Trading discipline', stats: trading, weight: 35 },
