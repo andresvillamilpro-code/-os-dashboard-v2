@@ -1060,6 +1060,7 @@ function renderWeekGrid() {
   });
 
   const hours = Array.from({ length: 24 }, (_, h) => h);
+  const gridHeight = 24 * HOUR_HEIGHT;
 
   gridEl.innerHTML = `
     <div class="cal-grid-wrap">
@@ -1077,18 +1078,18 @@ function renderWeekGrid() {
         ${dayData.map(d => `
           <div class="cal-allday-cell" data-day="${d.dStr}">
             ${d.allDay.map(ev => `
-              <div class="cal-allday-chip" style="background:${colorForEvent(ev)};" data-event-id="${ev.id}">${escapeHtml(ev.summary || '(No title)')}</div>
+              <div class="cal-allday-chip" draggable="true" style="background:${colorForEvent(ev)};" data-event-id="${ev.id}">${escapeHtml(ev.summary || '(No title)')}</div>
             `).join('')}
           </div>
         `).join('')}
       </div>
       <div class="cal-grid-scroll" id="cal-grid-scroll">
-        <div class="cal-grid-gutter cal-grid-hours">
-          ${hours.map(h => `<div class="cal-hour-cell"><span class="cal-hour-label">${formatHourLabel(h)}</span></div>`).join('')}
+        <div class="cal-grid-gutter cal-grid-hours" style="height:${gridHeight}px;">
+          ${hours.map(h => `<span class="cal-hour-label" style="top:${h * HOUR_HEIGHT - 7}px;">${formatHourLabel(h)}</span>`).join('')}
         </div>
-        <div class="cal-grid-days">
+        <div class="cal-grid-days" style="height:${gridHeight}px;">
           ${dayData.map(d => `
-            <div class="cal-day-col" data-day="${d.dStr}">
+            <div class="cal-day-col" data-day="${d.dStr}" style="height:${gridHeight}px;">
               ${d.timed.map(ev => {
                 const start = new Date(ev.start.dateTime);
                 const end = ev.end?.dateTime ? new Date(ev.end.dateTime) : new Date(start.getTime() + 30 * 60000);
@@ -1098,7 +1099,7 @@ function renderWeekGrid() {
                 const height = Math.max(18, ((endMin - startMin) / 60) * HOUR_HEIGHT - 2);
                 const timeLabel = start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
                 return `
-                  <div class="cal-event-block" data-event-id="${ev.id}" style="top:${top}px;height:${height}px;background:${colorForEvent(ev)};">
+                  <div class="cal-event-block" draggable="true" data-event-id="${ev.id}" style="top:${top}px;height:${height}px;background:${colorForEvent(ev)};">
                     <span class="evt-title">${escapeHtml(ev.summary || '(No title)')}</span>
                     <span class="evt-time">${timeLabel}</span>
                   </div>
@@ -1119,6 +1120,13 @@ function renderWeekGrid() {
       const ev = calendarEventsCache.find(ev => ev.id === chip.dataset.eventId);
       if (ev) openEventForm(ev);
     });
+    // Drag to move to a different day — keeps the same time-of-day, just changes the date
+    chip.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', chip.dataset.eventId);
+      e.dataTransfer.effectAllowed = 'move';
+      setTimeout(() => chip.classList.add('dragging'), 0);
+    });
+    chip.addEventListener('dragend', () => chip.classList.remove('dragging'));
   });
 
   // Click empty grid space → create a new event pre-filled at that time
@@ -1148,6 +1156,24 @@ function renderWeekGrid() {
     });
   });
 
+  // Drop target: any day column (timed) or all-day cell — moves the dragged event to that day
+  gridEl.querySelectorAll('.cal-day-col, .cal-allday-cell').forEach(target => {
+    target.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      target.classList.add('drag-over');
+    });
+    target.addEventListener('dragleave', () => target.classList.remove('drag-over'));
+    target.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      target.classList.remove('drag-over');
+      const eventId = e.dataTransfer.getData('text/plain');
+      const ev = calendarEventsCache.find(x => x.id === eventId);
+      if (!ev) return;
+      await moveEventToDate(ev, target.dataset.day);
+    });
+  });
+
   // Scroll to a sensible starting point — near "now" if today's in view, else mid-morning
   requestAnimationFrame(() => {
     const scrollEl = document.getElementById('cal-grid-scroll');
@@ -1155,6 +1181,36 @@ function renderWeekGrid() {
     const scrollHour = todayInWeek ? Math.max(0, now.getHours() - 1) : 6;
     scrollEl.scrollTop = scrollHour * HOUR_HEIGHT;
   });
+}
+
+// Moves an event to a different day, keeping its original time-of-day and
+// duration intact (drag-and-drop between day columns).
+async function moveEventToDate(ev, newDateStr) {
+  const pad = (n) => String(n).padStart(2, '0');
+  let body;
+  if (ev.start?.dateTime) {
+    const oldStart = new Date(ev.start.dateTime);
+    const oldEnd = new Date(ev.end.dateTime);
+    const durationMs = oldEnd.getTime() - oldStart.getTime();
+    const startTimeStr = `${pad(oldStart.getHours())}:${pad(oldStart.getMinutes())}:00`;
+    const newStart = new Date(`${newDateStr}T${startTimeStr}`);
+    const newEnd = new Date(newStart.getTime() + durationMs);
+    const endDateStr = isoDate(newEnd);
+    const endTimeStr = `${pad(newEnd.getHours())}:${pad(newEnd.getMinutes())}:00`;
+    body = {
+      start: { dateTime: `${newDateStr}T${startTimeStr}`, timeZone: LOCAL_TZ },
+      end: { dateTime: `${endDateStr}T${endTimeStr}`, timeZone: LOCAL_TZ }
+    };
+  } else {
+    const spanDays = Math.round((new Date(ev.end.date) - new Date(ev.start.date)) / 86400000) || 1;
+    body = { start: { date: newDateStr }, end: { date: addDaysISO(newDateStr, spanDays) } };
+  }
+  try {
+    await updateCalendarEvent(ev.id, body);
+    loadAndRenderWeek();
+  } catch {
+    alert('Could not move event — try again.');
+  }
 }
 
 function openEventForm(event, prefill) {
