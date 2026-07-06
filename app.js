@@ -26,6 +26,12 @@ function escapeHtmlSafe(str) {
 let sb;
 try {
   sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+  // Fires automatically when someone opens a Supabase password-reset email
+  // link (the access token in the URL is auto-detected on load) — shows a
+  // dedicated "set new password" screen instead of the normal login/app.
+  sb.auth.onAuthStateChange((event) => {
+    if (event === 'PASSWORD_RECOVERY') showSetNewPasswordScreen();
+  });
 } catch (err) {
   document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('app').innerHTML = `<div class="card" style="margin:20px;"><p class="card-title" style="color:var(--red)">Could not load Supabase library</p><p class="empty-state">${escapeHtmlSafe(err.message)}</p></div>`;
@@ -159,6 +165,52 @@ function startMatrixRain(canvas) {
       drops[i]++;
     }
   }, 45);
+}
+
+function showSetNewPasswordScreen() {
+  document.getElementById('app').innerHTML = `
+    <div class="matrix-login-wrap">
+      <canvas id="matrix-rain-canvas"></canvas>
+      <div class="matrix-login-box">
+        <div class="matrix-login-title">OS // Andres Villamil</div>
+        <div class="matrix-login-sub">Set new access code</div>
+        <form class="matrix-login-form" id="new-password-form">
+          <div class="matrix-input-wrap">
+            <span>&gt;</span>
+            <input type="password" id="new-password" placeholder="New password" required autofocus minlength="6" />
+          </div>
+          <div class="matrix-input-wrap">
+            <span>&gt;</span>
+            <input type="password" id="new-password-confirm" placeholder="Confirm new password" required minlength="6" />
+          </div>
+          <button type="submit" class="matrix-login-btn">Set password</button>
+        </form>
+        <div class="matrix-login-error" id="new-password-error"></div>
+      </div>
+    </div>
+  `;
+  startMatrixRain(document.getElementById('matrix-rain-canvas'));
+
+  const form = document.getElementById('new-password-form');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errorEl = document.getElementById('new-password-error');
+    const pw = document.getElementById('new-password').value;
+    const pwConfirm = document.getElementById('new-password-confirm').value;
+    if (pw !== pwConfirm) {
+      errorEl.textContent = 'PASSWORDS DO NOT MATCH.';
+      return;
+    }
+    try {
+      const { error } = await sb.auth.updateUser({ password: pw });
+      if (error) throw error;
+      // Clear the recovery token out of the URL, then go straight into the app
+      history.replaceState(null, '', window.location.pathname);
+      location.reload();
+    } catch (err) {
+      errorEl.textContent = 'COULD NOT SET PASSWORD — ' + (err.message || 'try again.').toUpperCase();
+    }
+  });
 }
 
 function showLoginScreen() {
