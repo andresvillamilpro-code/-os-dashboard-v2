@@ -148,6 +148,9 @@
     .progress-fill { height: 100%; background: var(--purple); border-radius: 4px; transition: width .3s; }
     .file-input-btn { display: inline-block; background: var(--purple); color: #EEEDFE; border-radius: 7px; padding: 7px 14px; font-size: 11px; font-weight: 500; cursor: pointer; }
     .file-input-btn input { display: none; }
+    .settings-gear-btn { cursor: pointer; font-size: 15px; opacity: .55; transition: opacity .15s, transform .15s; user-select: none; padding: 2px 4px; }
+    .settings-gear-btn:hover { opacity: 1; transform: rotate(20deg); }
+    .settings-panel { margin-top: 12px; padding-top: 12px; border-top: 0.5px solid var(--border2); }
     @media (max-width: 768px) {
       .stat-grid-4 { grid-template-columns: repeat(2, 1fr); }
       .stat-grid-3 { grid-template-columns: 1fr; }
