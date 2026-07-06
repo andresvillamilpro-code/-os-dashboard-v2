@@ -101,14 +101,18 @@ async function deleteConsistencyItem(itemName) {
 // AUTH HELPERS
 // ============================================
 
+// Single-user app — email is fixed internally so the login screen only
+// asks for the password. Replace this before deploying.
+const LOGIN_EMAIL = 'andresvillamilpro@gmail.com';
+
 async function getCurrentUser() {
   const { data, error } = await sb.auth.getUser();
   if (error || !data?.user) return null;
   return data.user;
 }
 
-async function signIn(email, password) {
-  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+async function signIn(password) {
+  const { data, error } = await sb.auth.signInWithPassword({ email: LOGIN_EMAIL, password });
   if (error) throw error;
   return data.user;
 }
@@ -127,33 +131,63 @@ async function requireAuth() {
   return user;
 }
 
+function startMatrixRain(canvas) {
+  const ctx = canvas.getContext('2d');
+  const resize = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; };
+  resize();
+  window.addEventListener('resize', resize);
+  const glyphs = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const fontSize = 15;
+  let columns = Math.floor(canvas.width / fontSize);
+  let drops = new Array(columns).fill(1);
+  window.addEventListener('resize', () => {
+    columns = Math.floor(canvas.width / fontSize);
+    drops = new Array(columns).fill(1);
+  });
+  return setInterval(() => {
+    ctx.fillStyle = 'rgba(0,0,0,0.06)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#0F0';
+    ctx.font = fontSize + 'px monospace';
+    for (let i = 0; i < drops.length; i++) {
+      const char = glyphs[Math.floor(Math.random() * glyphs.length)];
+      ctx.fillText(char, i * fontSize, drops[i] * fontSize);
+      if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) drops[i] = 0;
+      drops[i]++;
+    }
+  }, 45);
+}
+
 function showLoginScreen() {
   document.getElementById('app').innerHTML = `
-    <div class="login-wrap">
-      <div class="login-box">
-        <div class="login-title">OS — Andres Villamil</div>
-        <div class="login-sub">Sign in to continue</div>
-        <form class="login-form" id="login-form">
-          <input type="email" id="login-email" placeholder="Email" required />
-          <input type="password" id="login-password" placeholder="Password" required />
-          <button type="submit" class="btn-secondary">Sign in</button>
+    <div class="matrix-login-wrap">
+      <canvas id="matrix-rain-canvas"></canvas>
+      <div class="matrix-login-box">
+        <div class="matrix-login-title">OS // Andres Villamil</div>
+        <div class="matrix-login-sub">Enter access code</div>
+        <form class="matrix-login-form" id="login-form">
+          <div class="matrix-input-wrap">
+            <span>&gt;</span>
+            <input type="password" id="login-password" placeholder="••••••••" required autofocus />
+          </div>
+          <button type="submit" class="matrix-login-btn">Access system</button>
         </form>
-        <div class="login-error" id="login-error" hidden></div>
+        <div class="matrix-login-error" id="login-error"></div>
       </div>
     </div>
   `;
+  startMatrixRain(document.getElementById('matrix-rain-canvas'));
+
   const form = document.getElementById('login-form');
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const email = document.getElementById('login-email').value.trim();
     const password = document.getElementById('login-password').value;
     const errorEl = document.getElementById('login-error');
     try {
-      await signIn(email, password);
+      await signIn(password);
       location.reload();
     } catch (err) {
-      errorEl.textContent = 'Sign-in failed — check your email and password.';
-      errorEl.hidden = false;
+      errorEl.textContent = 'ACCESS DENIED — incorrect password.';
     }
   });
 }
@@ -2769,6 +2803,54 @@ async function getDisciplineSystemConsistencyItems() {
   return names.filter(n => !['Family time', '20 pages reading'].includes(n));
 }
 
+// Like calcChecklistGroupStats, but with one substitution rule: the actual
+// training goal is 5 days/week, not 7, so requiring 'Gym' checked every
+// single calendar day would cap this group below 100% even with perfect
+// adherence to that real target. A day counts as compliant for 'Gym' if
+// EITHER Gym (consistency_log) OR "Walk 10 min" (morning_routine_log) was
+// checked that day — a planned rest-day walk counts as showing up.
+async function calcConsistencyGroupStatsForGoal3(itemNames) {
+  const todayStr = todayISO();
+  const startStr = addDaysISO(todayStr, -29);
+  const needsWalkData = itemNames.includes('Gym');
+
+  const [{ data: consistencyRows }, walkRes] = await Promise.all([
+    sb.from('consistency_log').select('log_date, item_name, completed')
+      .in('item_name', itemNames).gte('log_date', startStr).lte('log_date', todayStr),
+    needsWalkData
+      ? sb.from('morning_routine_log').select('log_date, completed')
+          .eq('item_name', 'Walk 10 min').gte('log_date', startStr).lte('log_date', todayStr)
+      : Promise.resolve({ data: [] }),
+  ]);
+
+  const byDate = {};
+  (consistencyRows || []).forEach(r => {
+    if (!byDate[r.log_date]) byDate[r.log_date] = {};
+    byDate[r.log_date][r.item_name] = r.completed;
+  });
+  const walkedByDate = {};
+  (walkRes.data || []).forEach(r => { walkedByDate[r.log_date] = r.completed; });
+
+  const hasAnyData = Object.keys(byDate).length > 0;
+  const days = [];
+  for (let i = 0; i < 30; i++) days.push(addDaysISO(todayStr, -29 + i));
+  const dayRate = (d) => {
+    const entry = byDate[d];
+    if (!entry) return 0;
+    const done = itemNames.filter(n => {
+      if (n === 'Gym') return entry[n] || walkedByDate[d];
+      return entry[n];
+    }).length;
+    return done / itemNames.length;
+  };
+  const avg = (list) => list.reduce((s, d) => s + dayRate(d), 0) / list.length;
+  const last30Rate = avg(days);
+  const last7Rate = avg(days.slice(-7));
+  const score = hasAnyData ? Math.round((0.6 * last7Rate + 0.4 * last30Rate) * 100) : 0;
+  const trend = !hasAnyData ? 'no_data' : last7Rate > last30Rate + 0.05 ? 'up' : last7Rate < last30Rate - 0.05 ? 'down' : 'stable';
+  return { score, trend, hasAnyData };
+}
+
 // Goal 3 — Discipline System (trading + fitness + morning + consistency)
 async function computeDisciplineSystemGoal() {
   const consistencySystemItems = await getDisciplineSystemConsistencyItems();
@@ -2777,7 +2859,7 @@ async function computeDisciplineSystemGoal() {
     calcSessionScoreStats('fitness_daily_session', 'session_date', 'discipline_score', { scale: 100 / FITNESS_DAILY_MAX }),
     calcChecklistGroupStats('morning_routine_log', MORNING_ROUTINE_ITEMS),
     consistencySystemItems.length
-      ? calcChecklistGroupStats('consistency_log', consistencySystemItems)
+      ? calcConsistencyGroupStatsForGoal3(consistencySystemItems)
       : Promise.resolve({ score: 0, trend: 'no_data', hasAnyData: false }),
   ]);
   const metrics = [
