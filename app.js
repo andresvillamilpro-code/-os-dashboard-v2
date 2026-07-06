@@ -1279,18 +1279,20 @@ async function renderTradingTab() {
     </div>
 
     <div class="card">
-      <p class="card-title">Account settings</p>
-      <form id="trading-settings-form" class="settings-grid">
-        <div class="settings-field"><label>Account size ($)</label><input type="text" name="account_size" value="${accountSize}" /></div>
-        <div class="settings-field"><label>Profit target (%)</label><input type="text" name="profit_target_pct" value="${settings.profit_target_pct}" /></div>
-        <div class="settings-field"><label>Max trades / week</label><input type="text" name="max_trades_per_week" value="${settings.max_trades_per_week}" /></div>
-        <div class="settings-field"><label>Max losses / week</label><input type="text" name="max_losses_per_week" value="${settings.max_losses_per_week}" /></div>
-      </form>
-    </div>
-
-    <div class="card">
-      <p class="card-title">Balance over time</p>
+      <div class="card-header">
+        <p class="card-title" style="margin-bottom:0;">Balance over time</p>
+        <span class="settings-gear-btn" id="trading-settings-toggle" title="Account settings">⚙️</span>
+      </div>
       <div class="chart-wrap"><canvas id="balance-chart"></canvas></div>
+      <div id="trading-settings-panel" class="settings-panel" style="display:none;">
+        <p class="card-title" style="margin-top:2px;">Account settings</p>
+        <form id="trading-settings-form" class="settings-grid">
+          <div class="settings-field"><label>Account size ($)</label><input type="text" name="account_size" value="${accountSize}" /></div>
+          <div class="settings-field"><label>Profit target (%)</label><input type="text" name="profit_target_pct" value="${settings.profit_target_pct}" /></div>
+          <div class="settings-field"><label>Max trades / week</label><input type="text" name="max_trades_per_week" value="${settings.max_trades_per_week}" /></div>
+          <div class="settings-field"><label>Max losses / week</label><input type="text" name="max_losses_per_week" value="${settings.max_losses_per_week}" /></div>
+        </form>
+      </div>
     </div>
 
     <div class="two-col">
@@ -1350,11 +1352,22 @@ async function renderTradingTab() {
   `;
 
   attachTradingSettingsHandler();
+  attachTradingSettingsToggle();
   attachCsvUploadHandler();
   drawTradingCharts({ balancePoints, byInstrument, byDow, dowNames, byHour });
 
   // Load discipline section async (doesn't block the main render)
   loadAndRenderDisciplineSection();
+}
+
+function attachTradingSettingsToggle() {
+  const btn = document.getElementById('trading-settings-toggle');
+  const panel = document.getElementById('trading-settings-panel');
+  if (!btn || !panel) return;
+  btn.addEventListener('click', () => {
+    const isOpen = panel.style.display !== 'none';
+    panel.style.display = isOpen ? 'none' : 'block';
+  });
 }
 
 function attachTradingSettingsHandler() {
