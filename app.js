@@ -33,7 +33,10 @@ try {
 }
 
 const GOOGLE_CLIENT_ID = '915567420685-hdr89piauoouang6lp1vlaiu33p6n4jb.apps.googleusercontent.com';
-const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
+// Widened from calendar.readonly — the Calendar tab needs to create/edit/delete
+// events, not just list them. This scope covers full event CRUD without
+// granting broader calendar management (renaming calendars, sharing, etc).
+const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
 
 const MISSION_STATEMENT = '"No discipline seems pleasant at the time, but painful. Later on, however, it produces a harvest of righteousness and peace for those who have been trained by it." — Hebrews 12:11';
 
@@ -103,7 +106,7 @@ async function deleteConsistencyItem(itemName) {
 
 // Single-user app — email is fixed internally so the login screen only
 // asks for the password. Replace this before deploying.
-const LOGIN_EMAIL = 'andresvillamilpro@gmail.com';
+const LOGIN_EMAIL = 'REPLACE_WITH_YOUR_EMAIL@example.com';
 
 async function getCurrentUser() {
   const { data, error } = await sb.auth.getUser();
@@ -237,7 +240,7 @@ const TAB_RENDERERS = {
   trading: renderTradingTab,
   fitness: renderFitnessTab,
   goals: renderGoalsTab,
-  calendar: () => renderPlaceholderTab('Calendar', 'Full calendar tab is coming soon.')
+  calendar: renderCalendarTab
 };
 
 function switchTab(tabName) {
@@ -751,35 +754,117 @@ function renderCalendarCard() {
   `;
 }
 
-function initGoogleCalendar() {
-  const token = sessionStorage.getItem('gcal_token');
-  if (token) {
-    fetchTodayEvents(token);
-  } else {
-    const btn = document.getElementById('connect-calendar-btn');
-    if (btn) btn.addEventListener('click', startGoogleAuth);
+// ============================================
+// GOOGLE CALENDAR AUTH — persistent silent refresh
+// Token + expiry live in localStorage (survives closing the tab, unlike the
+// old sessionStorage approach). When expired, we first try a silent refresh
+// (no popup) via Google Identity Services — this works as long as you're
+// still signed into your Google account in this browser. Only falls back to
+// the "Connect" button if that silent attempt truly fails (e.g. you signed
+// out of Google entirely, or revoked access).
+// ============================================
+
+function saveGoogleToken(response) {
+  const expiresAt = Date.now() + (Number(response.expires_in || 3600) * 1000);
+  localStorage.setItem('gcal_token', response.access_token);
+  localStorage.setItem('gcal_token_expiry', String(expiresAt));
+}
+
+function getStoredGoogleToken() {
+  const token = localStorage.getItem('gcal_token');
+  const expiry = Number(localStorage.getItem('gcal_token_expiry') || 0);
+  // Treat as expired 2 minutes early so we refresh before a request fails mid-flight
+  if (!token || Date.now() > expiry - 120000) return null;
+  return token;
+}
+
+function clearGoogleToken() {
+  localStorage.removeItem('gcal_token');
+  localStorage.removeItem('gcal_token_expiry');
+}
+
+function getGoogleTokenClient(callback) {
+  if (!window.google?.accounts?.oauth2) return null;
+  return window.google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: GOOGLE_SCOPE,
+    callback
+  });
+}
+
+// Tries to get a fresh token with no popup. Succeeds silently if you're
+// still signed into Google in this browser and already granted access before.
+function silentlyRefreshGoogleToken(onSuccess, onFail) {
+  const client = getGoogleTokenClient((response) => {
+    if (response?.access_token) {
+      saveGoogleToken(response);
+      onSuccess(response.access_token);
+    } else {
+      onFail && onFail();
+    }
+  });
+  if (!client) { onFail && onFail(); return; }
+  try {
+    client.requestAccessToken({ prompt: '' });
+  } catch {
+    onFail && onFail();
   }
 }
 
-function startGoogleAuth() {
+// Main entry point: get a usable token, refreshing silently if needed,
+// falling back to onNeedsConnect (show the Connect button) only if that fails.
+function ensureGoogleToken(onReady, onNeedsConnect) {
+  const token = getStoredGoogleToken();
+  if (token) { onReady(token); return; }
+  silentlyRefreshGoogleToken(onReady, onNeedsConnect);
+}
+
+// Explicit, user-clicked first-time connection (shows Google's consent screen).
+function startGoogleAuth(onSuccess) {
   if (!window.google?.accounts?.oauth2) {
     alert('Google sign-in is still loading, try again in a moment.');
     return;
   }
-  const tokenClient = window.google.accounts.oauth2.initTokenClient({
-    client_id: GOOGLE_CLIENT_ID,
-    scope: GOOGLE_SCOPE,
-    callback: (response) => {
-      if (response.access_token) {
-        sessionStorage.setItem('gcal_token', response.access_token);
-        fetchTodayEvents(response.access_token);
-      }
+  const tokenClient = getGoogleTokenClient((response) => {
+    if (response.access_token) {
+      saveGoogleToken(response);
+      onSuccess(response.access_token);
     }
   });
   tokenClient.requestAccessToken();
 }
 
-async function fetchTodayEvents(token) {
+// Wraps a Google Calendar API call — if it 401s (expired/revoked token),
+// tries one silent refresh + retry before giving up.
+async function googleCalendarFetch(url, options = {}) {
+  const token = getStoredGoogleToken() || localStorage.getItem('gcal_token');
+  const doFetch = (t) => fetch(url, { ...options, headers: { ...(options.headers || {}), Authorization: `Bearer ${t}` } });
+
+  let res = await doFetch(token);
+  if (res.status === 401) {
+    const refreshed = await new Promise((resolve) => {
+      silentlyRefreshGoogleToken((newToken) => resolve(newToken), () => resolve(null));
+    });
+    if (refreshed) {
+      res = await doFetch(refreshed);
+    } else {
+      clearGoogleToken();
+    }
+  }
+  return res;
+}
+
+function initGoogleCalendar() {
+  ensureGoogleToken(
+    (token) => fetchTodayEvents(token),
+    () => {
+      const btn = document.getElementById('connect-calendar-btn');
+      if (btn) btn.addEventListener('click', () => startGoogleAuth((token) => fetchTodayEvents(token)));
+    }
+  );
+}
+
+async function fetchTodayEvents() {
   const eventsEl = document.getElementById('calendar-events');
   const statusEl = document.getElementById('cal-status');
   if (!eventsEl) return;
@@ -790,11 +875,10 @@ async function fetchTodayEvents(token) {
 
   try {
     const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${start.toISOString()}&timeMax=${end.toISOString()}&singleEvents=true&orderBy=startTime`;
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    const res = await googleCalendarFetch(url);
     if (res.status === 401) {
-      sessionStorage.removeItem('gcal_token');
       eventsEl.innerHTML = `<div class="empty-state"><button class="btn-secondary" id="connect-calendar-btn">Connect Google Calendar</button></div>`;
-      document.getElementById('connect-calendar-btn')?.addEventListener('click', startGoogleAuth);
+      document.getElementById('connect-calendar-btn')?.addEventListener('click', () => startGoogleAuth((token) => fetchTodayEvents(token)));
       return;
     }
     const data = await res.json();
@@ -820,6 +904,290 @@ async function fetchTodayEvents(token) {
   } catch (err) {
     eventsEl.innerHTML = '<p class="empty-state">Could not load calendar events.</p>';
   }
+}
+
+// ============================================
+// CALENDAR TAB — week grid, full CRUD, backed live by Google Calendar
+// ============================================
+
+let calendarWeekStart = getMondayOfWeek(); // Date object, local midnight Monday — persists across tab switches
+let calendarEventsCache = [];
+let calendarEditingEventId = null;
+const LOCAL_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+async function renderCalendarTab() {
+  const container = document.getElementById('tab-content');
+  container.innerHTML = `<p class="loading-text">Loading calendar...</p>`;
+  const user = await requireAuth();
+  if (!user) return;
+
+  container.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <p class="card-title" style="margin-bottom:0;">Calendar</p>
+        <button class="btn-secondary" id="cal-new-event-btn">+ New event</button>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;">
+        <button class="week-nav-btn" id="cal-prev-week">← Prev</button>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span id="cal-week-label" style="font-size:13px;font-weight:500;color:var(--text2);"></span>
+          <button class="week-nav-btn" id="cal-today-btn">Today</button>
+        </div>
+        <button class="week-nav-btn" id="cal-next-week">Next →</button>
+      </div>
+      <div id="cal-event-form-wrap"></div>
+      <div id="cal-connect-wrap"></div>
+      <div id="cal-week-grid"></div>
+    </div>
+  `;
+
+  document.getElementById('cal-prev-week').addEventListener('click', () => shiftCalendarWeek(-7));
+  document.getElementById('cal-next-week').addEventListener('click', () => shiftCalendarWeek(7));
+  document.getElementById('cal-today-btn').addEventListener('click', () => {
+    calendarWeekStart = getMondayOfWeek();
+    loadAndRenderWeek();
+  });
+  document.getElementById('cal-new-event-btn').addEventListener('click', () => openEventForm(null));
+
+  ensureGoogleToken(
+    () => loadAndRenderWeek(),
+    () => showCalendarConnectPrompt()
+  );
+}
+
+function shiftCalendarWeek(deltaDays) {
+  calendarWeekStart = new Date(calendarWeekStart);
+  calendarWeekStart.setDate(calendarWeekStart.getDate() + deltaDays);
+  loadAndRenderWeek();
+}
+
+function showCalendarConnectPrompt() {
+  const gridEl = document.getElementById('cal-week-grid');
+  const connectWrap = document.getElementById('cal-connect-wrap');
+  if (gridEl) gridEl.innerHTML = '';
+  if (connectWrap) {
+    connectWrap.innerHTML = `<div class="empty-state"><button class="btn-secondary" id="cal-connect-btn">Connect Google Calendar</button></div>`;
+    document.getElementById('cal-connect-btn')?.addEventListener('click', () => startGoogleAuth(() => loadAndRenderWeek()));
+  }
+}
+
+async function loadAndRenderWeek() {
+  const gridEl = document.getElementById('cal-week-grid');
+  const labelEl = document.getElementById('cal-week-label');
+  const connectWrap = document.getElementById('cal-connect-wrap');
+  if (!gridEl) return;
+
+  const weekEnd = new Date(calendarWeekStart);
+  weekEnd.setDate(weekEnd.getDate() + 7);
+
+  if (labelEl) {
+    const opts = { month: 'short', day: 'numeric' };
+    const lastDay = new Date(weekEnd.getTime() - 86400000);
+    labelEl.textContent = `${calendarWeekStart.toLocaleDateString(undefined, opts)} – ${lastDay.toLocaleDateString(undefined, opts)}`;
+  }
+
+  gridEl.innerHTML = '<p class="loading-text">Loading events...</p>';
+  if (connectWrap) connectWrap.innerHTML = '';
+
+  try {
+    const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${calendarWeekStart.toISOString()}&timeMax=${weekEnd.toISOString()}&singleEvents=true&orderBy=startTime`;
+    const res = await googleCalendarFetch(url);
+    if (res.status === 401) {
+      showCalendarConnectPrompt();
+      return;
+    }
+    const data = await res.json();
+    calendarEventsCache = data.items || [];
+    renderWeekGrid();
+  } catch (err) {
+    gridEl.innerHTML = '<p class="empty-state">Could not load calendar events.</p>';
+  }
+}
+
+function renderWeekGrid() {
+  const gridEl = document.getElementById('cal-week-grid');
+  if (!gridEl) return;
+
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(calendarWeekStart);
+    d.setDate(d.getDate() + i);
+    days.push(d);
+  }
+  const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const todayStr = todayISO();
+
+  gridEl.innerHTML = `
+    <div class="week-grid">
+      ${days.map((d, i) => {
+        const dStr = isoDate(d);
+        const dayEvents = calendarEventsCache
+          .filter(ev => (ev.start?.dateTime ? isoDate(new Date(ev.start.dateTime)) : ev.start?.date) === dStr)
+          .sort((a, b) => (a.start?.dateTime || a.start?.date || '').localeCompare(b.start?.dateTime || b.start?.date || ''));
+        const isToday = dStr === todayStr;
+        return `
+          <div class="week-day-col ${isToday ? 'is-today' : ''}">
+            <div class="week-day-header">
+              <span class="week-day-name">${dayNames[i]}</span>
+              <span class="week-day-num">${d.getDate()}</span>
+            </div>
+            <div class="week-day-events">
+              ${dayEvents.length ? dayEvents.map(ev => renderWeekEventChip(ev)).join('') : '<div class="week-day-empty">—</div>'}
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+
+  gridEl.querySelectorAll('.week-event-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const ev = calendarEventsCache.find(e => e.id === chip.dataset.eventId);
+      if (ev) openEventForm(ev);
+    });
+  });
+}
+
+function renderWeekEventChip(ev) {
+  const timeLabel = ev.start?.dateTime
+    ? new Date(ev.start.dateTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    : 'All day';
+  return `
+    <div class="week-event-chip" data-event-id="${ev.id}">
+      <span class="week-event-time">${timeLabel}</span>
+      <span class="week-event-title">${escapeHtml(ev.summary || '(No title)')}</span>
+    </div>
+  `;
+}
+
+function openEventForm(event) {
+  calendarEditingEventId = event ? event.id : null;
+  const wrap = document.getElementById('cal-event-form-wrap');
+  if (!wrap) return;
+
+  const isEdit = !!event;
+  const startDT = event?.start?.dateTime ? new Date(event.start.dateTime) : null;
+  const endDT = event?.end?.dateTime ? new Date(event.end.dateTime) : null;
+  const isAllDay = event ? !event.start?.dateTime : false;
+  const dateVal = event ? (event.start?.date || (startDT ? isoDate(startDT) : '')) : todayISO();
+  const pad = (n) => String(n).padStart(2, '0');
+  const startTimeVal = startDT ? `${pad(startDT.getHours())}:${pad(startDT.getMinutes())}` : '09:00';
+  const endTimeVal = endDT ? `${pad(endDT.getHours())}:${pad(endDT.getMinutes())}` : '10:00';
+
+  wrap.innerHTML = `
+    <div class="card" style="border:1px solid var(--purple-border);">
+      <p class="card-title">${isEdit ? 'Edit event' : 'New event'}</p>
+      <form id="cal-event-form" style="display:flex;flex-direction:column;gap:10px;">
+        <input type="text" name="title" placeholder="Event title" value="${event ? escapeHtml(event.summary || '') : ''}" required />
+        <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;">
+          <input type="date" name="date" value="${dateVal}" required />
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text3);">
+            <input type="checkbox" name="all_day" ${isAllDay ? 'checked' : ''} style="width:16px;height:16px;" /> All day
+          </label>
+        </div>
+        <div class="settings-grid" id="cal-time-fields" style="${isAllDay ? 'display:none;' : ''}">
+          <div class="settings-field"><label>Start time</label><input type="time" name="start_time" value="${startTimeVal}" /></div>
+          <div class="settings-field"><label>End time</label><input type="time" name="end_time" value="${endTimeVal}" /></div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
+          ${isEdit ? '<button type="button" class="btn-secondary" id="cal-delete-btn" style="background:var(--red);">Delete</button>' : ''}
+          <button type="button" class="btn-secondary" id="cal-cancel-btn" style="background:var(--bg3);color:var(--text2);">Cancel</button>
+          <button type="submit" class="btn-secondary">${isEdit ? 'Save changes' : 'Add event'}</button>
+        </div>
+        <div id="cal-form-error" style="font-size:11px;color:var(--red);"></div>
+      </form>
+    </div>
+  `;
+
+  const form = document.getElementById('cal-event-form');
+  const allDayCheckbox = form.querySelector('input[name="all_day"]');
+  const timeFields = document.getElementById('cal-time-fields');
+  allDayCheckbox.addEventListener('change', () => {
+    timeFields.style.display = allDayCheckbox.checked ? 'none' : '';
+  });
+
+  document.getElementById('cal-cancel-btn').addEventListener('click', () => {
+    wrap.innerHTML = '';
+    calendarEditingEventId = null;
+  });
+
+  if (isEdit) {
+    document.getElementById('cal-delete-btn').addEventListener('click', async () => {
+      if (!confirm('Delete this event?')) return;
+      try {
+        await deleteCalendarEvent(event.id);
+        wrap.innerHTML = '';
+        calendarEditingEventId = null;
+        loadAndRenderWeek();
+      } catch {
+        document.getElementById('cal-form-error').textContent = 'Could not delete — try again.';
+      }
+    });
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errorEl = document.getElementById('cal-form-error');
+    errorEl.textContent = '';
+    const fd = new FormData(form);
+    const title = (fd.get('title') || '').trim();
+    const date = fd.get('date');
+    const isAllDayVal = fd.get('all_day') === 'on';
+    if (!title || !date) { errorEl.textContent = 'Title and date are required.'; return; }
+
+    let body;
+    if (isAllDayVal) {
+      body = { summary: title, start: { date }, end: { date: addDaysISO(date, 1) } };
+    } else {
+      const startTime = fd.get('start_time') || '09:00';
+      const endTime = fd.get('end_time') || '10:00';
+      body = {
+        summary: title,
+        start: { dateTime: `${date}T${startTime}:00`, timeZone: LOCAL_TZ },
+        end: { dateTime: `${date}T${endTime}:00`, timeZone: LOCAL_TZ }
+      };
+    }
+
+    try {
+      if (isEdit) {
+        await updateCalendarEvent(event.id, body);
+      } else {
+        await createCalendarEvent(body);
+      }
+      wrap.innerHTML = '';
+      calendarEditingEventId = null;
+      loadAndRenderWeek();
+    } catch (err) {
+      errorEl.textContent = 'Could not save event — try again.';
+    }
+  });
+}
+
+async function createCalendarEvent(body) {
+  const res = await googleCalendarFetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) throw new Error('Create failed');
+  return res.json();
+}
+
+async function updateCalendarEvent(eventId, body) {
+  const res = await googleCalendarFetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) throw new Error('Update failed');
+  return res.json();
+}
+
+async function deleteCalendarEvent(eventId) {
+  const res = await googleCalendarFetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}`, {
+    method: 'DELETE'
+  });
+  if (!res.ok && res.status !== 410) throw new Error('Delete failed');
 }
 
 // ============================================
