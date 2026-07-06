@@ -259,9 +259,28 @@
   applyTheme(localStorage.getItem('os_theme') || 'dark');
 
   // Scroll-aware topbar
+  // Two different thresholds (enter/exit) instead of one — toggling the
+  // 'scrolled' class shrinks the topbar's own height (padding + collapsing
+  // the welcome banner), and since the topbar sits in normal document flow,
+  // that shrink shifts scrollY slightly. With a single threshold that nudge
+  // was enough to cross back over the same line, flickering on/off rapidly.
+  // A gap between the enter and exit points removes that feedback loop.
+  let topbarTicking = false;
   window.addEventListener('scroll', () => {
-    const topbar = document.querySelector('.topbar');
-    if (topbar) topbar.classList.toggle('scrolled', window.scrollY > 40);
+    if (topbarTicking) return;
+    topbarTicking = true;
+    requestAnimationFrame(() => {
+      const topbar = document.querySelector('.topbar');
+      if (topbar) {
+        const isScrolled = topbar.classList.contains('scrolled');
+        if (!isScrolled && window.scrollY > 60) {
+          topbar.classList.add('scrolled');
+        } else if (isScrolled && window.scrollY < 20) {
+          topbar.classList.remove('scrolled');
+        }
+      }
+      topbarTicking = false;
+    });
   }, { passive: true });
 
   // Live clock
