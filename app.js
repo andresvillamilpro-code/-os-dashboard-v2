@@ -163,7 +163,7 @@ function showLoginScreen() {
 // ============================================
 
 function todayISO() {
-  return new Date().toISOString().split('T')[0];
+  return isoDate(new Date());
 }
 
 function getMondayOfWeek(date = new Date()) {
@@ -175,8 +175,17 @@ function getMondayOfWeek(date = new Date()) {
   return d;
 }
 
+// Local calendar date (YYYY-MM-DD) — deliberately NOT toISOString().split('T')[0].
+// toISOString() converts to UTC first, which shifts the date whenever local
+// time is near the UTC day boundary — for Eastern time that's ~8pm, meaning
+// anything logged in the evening would silently save under tomorrow's date.
+// This uses the Date object's own local year/month/day instead, so "today"
+// always matches the calendar day on the clock in front of you.
 function isoDate(d) {
-  return d.toISOString().split('T')[0];
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 function escapeHtml(str) {
@@ -2368,7 +2377,7 @@ async function loadAndRenderFitnessDiscipline(thisWeek) {
 
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-  const thirtyDaysAgoISO = thirtyDaysAgo.toISOString().split('T')[0];
+  const thirtyDaysAgoISO = isoDate(thirtyDaysAgo);
 
   const sessions = await safeQuery(
     sb.from('fitness_daily_session').select('*').order('session_date', { ascending: false }).limit(60)
@@ -2447,7 +2456,7 @@ async function loadAndRenderFitnessDiscipline(thisWeek) {
     <div class="card">
       <p class="card-title">Recent sessions</p>
       ${sessions.slice(0, 7).map(s => {
-        const pct = Math.round((s.discipline_score||0)/80*100);
+        const pct = Math.round((s.discipline_score||0)/FITNESS_DAILY_MAX*100);
         const col = scoreColor(pct);
         return `<div class="check-row">
           <span class="check-label" style="color:var(--text4);min-width:90px;">${s.session_date}</span>
