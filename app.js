@@ -1004,6 +1004,32 @@ async function loadAndRenderWeek() {
   }
 }
 
+const HOUR_HEIGHT = 48; // px per hour in the time grid
+
+// Google Calendar's standard event color palette (colorId 1-11), used when
+// an event has one set. Falls back to a deterministic hash-of-title color
+// so recurring event names (Gym, Backtest, etc.) still get a consistent,
+// distinct color even without ever setting colorId manually.
+const GOOGLE_EVENT_COLORS = {
+  '1': '#7986CB', '2': '#33B679', '3': '#8E24AA', '4': '#E67C73', '5': '#F6BF26',
+  '6': '#F4511E', '7': '#039BE5', '8': '#616161', '9': '#3F51B5', '10': '#0B8043', '11': '#D50000'
+};
+const FALLBACK_EVENT_PALETTE = ['#7986CB', '#33B679', '#8E24AA', '#E67C73', '#F6BF26', '#F4511E', '#039BE5', '#0B8043', '#3F51B5'];
+
+function colorForEvent(ev) {
+  if (ev.colorId && GOOGLE_EVENT_COLORS[ev.colorId]) return GOOGLE_EVENT_COLORS[ev.colorId];
+  const str = ev.summary || '';
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
+  return FALLBACK_EVENT_PALETTE[hash % FALLBACK_EVENT_PALETTE.length];
+}
+
+function formatHourLabel(h) {
+  if (h === 0) return '12 AM';
+  if (h === 12) return '12 PM';
+  return h < 12 ? `${h} AM` : `${h - 12} PM`;
+}
+
 function renderWeekGrid() {
   const gridEl = document.getElementById('cal-week-grid');
   if (!gridEl) return;
@@ -1016,51 +1042,122 @@ function renderWeekGrid() {
   }
   const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   const todayStr = todayISO();
+  const now = new Date();
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  let todayInWeek = false;
+
+  const dayData = days.map((d, i) => {
+    const dStr = isoDate(d);
+    if (dStr === todayStr) todayInWeek = true;
+    const dayEvents = calendarEventsCache.filter(ev =>
+      (ev.start?.dateTime ? isoDate(new Date(ev.start.dateTime)) : ev.start?.date) === dStr
+    );
+    return {
+      date: d, dStr, isToday: dStr === todayStr,
+      allDay: dayEvents.filter(ev => !ev.start?.dateTime),
+      timed: dayEvents.filter(ev => ev.start?.dateTime)
+    };
+  });
+
+  const hours = Array.from({ length: 24 }, (_, h) => h);
 
   gridEl.innerHTML = `
-    <div class="week-grid">
-      ${days.map((d, i) => {
-        const dStr = isoDate(d);
-        const dayEvents = calendarEventsCache
-          .filter(ev => (ev.start?.dateTime ? isoDate(new Date(ev.start.dateTime)) : ev.start?.date) === dStr)
-          .sort((a, b) => (a.start?.dateTime || a.start?.date || '').localeCompare(b.start?.dateTime || b.start?.date || ''));
-        const isToday = dStr === todayStr;
-        return `
-          <div class="week-day-col ${isToday ? 'is-today' : ''}">
-            <div class="week-day-header">
-              <span class="week-day-name">${dayNames[i]}</span>
-              <span class="week-day-num">${d.getDate()}</span>
-            </div>
-            <div class="week-day-events">
-              ${dayEvents.length ? dayEvents.map(ev => renderWeekEventChip(ev)).join('') : '<div class="week-day-empty">—</div>'}
-            </div>
+    <div class="cal-grid-wrap">
+      <div class="cal-grid-header">
+        <div class="cal-grid-gutter"></div>
+        ${dayData.map((d, i) => `
+          <div class="cal-grid-daycol-header ${d.isToday ? 'is-today' : ''}">
+            <span class="week-day-name">${dayNames[i]}</span>
+            <span class="week-day-num">${d.date.getDate()}</span>
           </div>
-        `;
-      }).join('')}
+        `).join('')}
+      </div>
+      <div class="cal-allday-row">
+        <div class="cal-grid-gutter"></div>
+        ${dayData.map(d => `
+          <div class="cal-allday-cell" data-day="${d.dStr}">
+            ${d.allDay.map(ev => `
+              <div class="cal-allday-chip" style="background:${colorForEvent(ev)};" data-event-id="${ev.id}">${escapeHtml(ev.summary || '(No title)')}</div>
+            `).join('')}
+          </div>
+        `).join('')}
+      </div>
+      <div class="cal-grid-scroll" id="cal-grid-scroll">
+        <div class="cal-grid-gutter cal-grid-hours">
+          ${hours.map(h => `<div class="cal-hour-cell"><span class="cal-hour-label">${formatHourLabel(h)}</span></div>`).join('')}
+        </div>
+        <div class="cal-grid-days">
+          ${dayData.map(d => `
+            <div class="cal-day-col" data-day="${d.dStr}">
+              ${d.timed.map(ev => {
+                const start = new Date(ev.start.dateTime);
+                const end = ev.end?.dateTime ? new Date(ev.end.dateTime) : new Date(start.getTime() + 30 * 60000);
+                const startMin = start.getHours() * 60 + start.getMinutes();
+                const endMin = Math.max(startMin + 15, end.getHours() * 60 + end.getMinutes());
+                const top = (startMin / 60) * HOUR_HEIGHT;
+                const height = Math.max(18, ((endMin - startMin) / 60) * HOUR_HEIGHT - 2);
+                const timeLabel = start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+                return `
+                  <div class="cal-event-block" data-event-id="${ev.id}" style="top:${top}px;height:${height}px;background:${colorForEvent(ev)};">
+                    <span class="evt-title">${escapeHtml(ev.summary || '(No title)')}</span>
+                    <span class="evt-time">${timeLabel}</span>
+                  </div>
+                `;
+              }).join('')}
+              ${d.isToday ? `<div class="cal-now-line" style="top:${(nowMinutes / 60) * HOUR_HEIGHT}px;"><span class="cal-now-dot"></span></div>` : ''}
+            </div>
+          `).join('')}
+        </div>
+      </div>
     </div>
   `;
 
-  gridEl.querySelectorAll('.week-event-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      const ev = calendarEventsCache.find(e => e.id === chip.dataset.eventId);
+  // Click an existing event (timed or all-day) → edit
+  gridEl.querySelectorAll('.cal-event-block, .cal-allday-chip').forEach(chip => {
+    chip.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const ev = calendarEventsCache.find(ev => ev.id === chip.dataset.eventId);
       if (ev) openEventForm(ev);
     });
   });
+
+  // Click empty grid space → create a new event pre-filled at that time
+  gridEl.querySelectorAll('.cal-day-col').forEach(col => {
+    col.addEventListener('click', (e) => {
+      if (e.target.closest('.cal-event-block')) return;
+      const rect = col.getBoundingClientRect();
+      const offsetY = e.clientY - rect.top;
+      const totalMinutes = Math.max(0, Math.min(23 * 60 + 45, (offsetY / HOUR_HEIGHT) * 60));
+      const snapped = Math.round(totalMinutes / 30) * 30;
+      const pad = (n) => String(n).padStart(2, '0');
+      const startHH = Math.floor(snapped / 60), startMM = snapped % 60;
+      const endTotal = Math.min(23 * 60 + 59, snapped + 60);
+      const endHH = Math.floor(endTotal / 60), endMM = endTotal % 60;
+      openEventForm(null, {
+        date: col.dataset.day,
+        startTime: `${pad(startHH)}:${pad(startMM)}`,
+        endTime: `${pad(endHH)}:${pad(endMM)}`
+      });
+    });
+  });
+
+  gridEl.querySelectorAll('.cal-allday-cell').forEach(cell => {
+    cell.addEventListener('click', (e) => {
+      if (e.target.closest('.cal-allday-chip')) return;
+      openEventForm(null, { date: cell.dataset.day, allDay: true });
+    });
+  });
+
+  // Scroll to a sensible starting point — near "now" if today's in view, else mid-morning
+  requestAnimationFrame(() => {
+    const scrollEl = document.getElementById('cal-grid-scroll');
+    if (!scrollEl) return;
+    const scrollHour = todayInWeek ? Math.max(0, now.getHours() - 1) : 6;
+    scrollEl.scrollTop = scrollHour * HOUR_HEIGHT;
+  });
 }
 
-function renderWeekEventChip(ev) {
-  const timeLabel = ev.start?.dateTime
-    ? new Date(ev.start.dateTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-    : 'All day';
-  return `
-    <div class="week-event-chip" data-event-id="${ev.id}">
-      <span class="week-event-time">${timeLabel}</span>
-      <span class="week-event-title">${escapeHtml(ev.summary || '(No title)')}</span>
-    </div>
-  `;
-}
-
-function openEventForm(event) {
+function openEventForm(event, prefill) {
   calendarEditingEventId = event ? event.id : null;
   const wrap = document.getElementById('cal-event-form-wrap');
   if (!wrap) return;
@@ -1068,11 +1165,11 @@ function openEventForm(event) {
   const isEdit = !!event;
   const startDT = event?.start?.dateTime ? new Date(event.start.dateTime) : null;
   const endDT = event?.end?.dateTime ? new Date(event.end.dateTime) : null;
-  const isAllDay = event ? !event.start?.dateTime : false;
-  const dateVal = event ? (event.start?.date || (startDT ? isoDate(startDT) : '')) : todayISO();
+  const isAllDay = event ? !event.start?.dateTime : !!prefill?.allDay;
+  const dateVal = event ? (event.start?.date || (startDT ? isoDate(startDT) : '')) : (prefill?.date || todayISO());
   const pad = (n) => String(n).padStart(2, '0');
-  const startTimeVal = startDT ? `${pad(startDT.getHours())}:${pad(startDT.getMinutes())}` : '09:00';
-  const endTimeVal = endDT ? `${pad(endDT.getHours())}:${pad(endDT.getMinutes())}` : '10:00';
+  const startTimeVal = startDT ? `${pad(startDT.getHours())}:${pad(startDT.getMinutes())}` : (prefill?.startTime || '09:00');
+  const endTimeVal = endDT ? `${pad(endDT.getHours())}:${pad(endDT.getMinutes())}` : (prefill?.endTime || '10:00');
 
   wrap.innerHTML = `
     <div class="card" style="border:1px solid var(--purple-border);">
