@@ -2676,7 +2676,7 @@ async function computeCompositeGoal(goalId, metrics) {
 
 // Goal 5 — Faith metrics
 const FAITH_METRICS = [
-  { table: 'consistency_log', itemName: 'Pray and bible study', label: 'Prayer + Bible', weight: 70, cadence: 'daily' },
+  { table: 'morning_routine_log', itemName: 'Pray and bible study', label: 'Prayer + Bible', weight: 70, cadence: 'daily' },
   { table: 'weekly_checks', itemName: 'Attended church this week', label: 'Church attendance', weight: 30, cadence: 'weekly' },
 ];
 
