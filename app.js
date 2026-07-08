@@ -112,7 +112,7 @@ async function deleteConsistencyItem(itemName) {
 
 // Single-user app — email is fixed internally so the login screen only
 // asks for the password. Replace this before deploying.
-const LOGIN_EMAIL = 'andresvillamilpro@gmail.com';
+const LOGIN_EMAIL = 'REPLACE_WITH_YOUR_EMAIL@example.com';
 
 async function getCurrentUser() {
   const { data, error } = await sb.auth.getUser();
@@ -296,7 +296,8 @@ const TAB_RENDERERS = {
   trading: renderTradingTab,
   fitness: renderFitnessTab,
   goals: renderGoalsTab,
-  calendar: renderCalendarTab
+  calendar: renderCalendarTab,
+  expenses: renderExpensesTab
 };
 
 function switchTab(tabName) {
@@ -3727,6 +3728,305 @@ function renderGoalsUI(analysis, cachedAt, period = 'weekly') {
 // ============================================
 // APP BOOTSTRAP — this was missing, which is why the page stayed blank
 // ============================================
+
+// ============================================
+// EXPENSES TAB
+// ============================================
+
+const EXPENSE_CATEGORIES = [
+  'Groceries', 'Restaurants', 'Subscriptions', 'Leisure/Entertainment',
+  'Transport', 'Phone & Utilities', 'Health', 'Trading Expenses'
+];
+
+function firstOfMonthISO(d = new Date()) {
+  return isoDate(new Date(d.getFullYear(), d.getMonth(), 1));
+}
+
+async function renderExpensesTab() {
+  const container = document.getElementById('tab-content');
+  container.innerHTML = `<p class="loading-text">Loading expenses...</p>`;
+  const user = await requireAuth();
+  if (!user) return;
+
+  const thisMonth = firstOfMonthISO();
+
+  const [categoryRows, trendRows, reviewRows, recentRows] = await Promise.all([
+    safeQuery(sb.from('expense_by_category_monthly').select('*').eq('month', thisMonth)),
+    safeQuery(sb.from('expense_monthly_trend').select('*').order('month', { ascending: true }).limit(12)),
+    safeQuery(sb.from('expense_log').select('*').eq('status', 'needs_review').order('created_at', { ascending: false })),
+    safeQuery(sb.from('expense_log').select('*').eq('status', 'confirmed').order('expense_date', { ascending: false }).limit(20)),
+  ]);
+
+  const monthTotal = categoryRows.reduce((s, r) => s + Number(r.total_amount || 0), 0);
+  const monthCount = categoryRows.reduce((s, r) => s + Number(r.transaction_count || 0), 0);
+  const reviewCount = reviewRows.length;
+
+  container.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <p class="card-title" style="margin-bottom:0;">Expenses</p>
+        <button class="btn-secondary" id="expense-add-btn">+ Add expense</button>
+      </div>
+      <div id="expense-add-form-wrap"></div>
+      <div class="stat-grid-3">
+        <div class="stat-box">
+          <div class="stat-box-value">$${monthTotal.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+          <div class="stat-box-label">This month</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-box-value">${monthCount}</div>
+          <div class="stat-box-label">Transactions</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-box-value" style="color:${reviewCount ? 'var(--amber)' : 'var(--text)'};">${reviewCount}</div>
+          <div class="stat-box-label">Needs review</div>
+        </div>
+      </div>
+    </div>
+
+    ${reviewCount ? `
+      <div class="card" id="expense-review-card">
+        <p class="card-title">Needs review</p>
+        <div id="expense-review-list"></div>
+      </div>
+    ` : ''}
+
+    <div class="two-col">
+      <div class="card">
+        <p class="card-title">This month by category</p>
+        <div class="chart-wrap-sm"><canvas id="expense-category-chart"></canvas></div>
+      </div>
+      <div class="card">
+        <p class="card-title">Monthly trend</p>
+        <div class="chart-wrap-sm"><canvas id="expense-trend-chart"></canvas></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <p class="card-title">Recent expenses</p>
+      <div id="expense-recent-list">
+        ${recentRows.length ? recentRows.map(r => renderExpenseRow(r)).join('') : '<p class="empty-state">No confirmed expenses yet.</p>'}
+      </div>
+    </div>
+  `;
+
+  if (reviewCount) {
+    const listEl = document.getElementById('expense-review-list');
+    listEl.innerHTML = reviewRows.map(r => renderReviewRow(r)).join('');
+    attachReviewRowHandlers(reviewRows);
+  }
+
+  renderExpenseCharts(categoryRows, trendRows);
+  attachExpenseAddHandlers();
+}
+
+function renderExpenseRow(r) {
+  const dateLabel = r.expense_date || '—';
+  const amountLabel = r.amount != null ? `$${Number(r.amount).toFixed(2)} ${r.currency || ''}`.trim() : '—';
+  return `
+    <div class="check-row">
+      <span class="check-label" style="min-width:80px;color:var(--text4);">${dateLabel}</span>
+      <span class="check-label" style="flex:1;">${escapeHtml(r.vendor || '(unknown vendor)')}</span>
+      <span class="check-label" style="min-width:110px;color:var(--text3);">${escapeHtml(r.category || '—')}</span>
+      <span class="check-label" style="min-width:90px;text-align:right;font-weight:500;">${amountLabel}</span>
+    </div>
+  `;
+}
+
+function renderReviewRow(r) {
+  const amountLabel = r.amount != null ? `$${Number(r.amount).toFixed(2)} ${r.currency || ''}`.trim() : 'missing amount';
+  return `
+    <div class="card" style="background:var(--amber-bg);border:0.5px solid var(--amber-border);margin-bottom:8px;" data-review-id="${r.id}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
+        <div>
+          <div style="font-size:12px;font-weight:500;color:var(--text2);">${escapeHtml(r.vendor || '(unknown vendor)')} — ${amountLabel}</div>
+          <div style="font-size:11px;color:var(--text4);margin-top:2px;">${r.expense_date || 'no date'} · ${escapeHtml(r.category || 'no category')}</div>
+        </div>
+        <div style="display:flex;gap:6px;">
+          <button type="button" class="btn-secondary expense-confirm-btn" data-id="${r.id}" style="background:var(--green);">✓ Confirm</button>
+          <button type="button" class="btn-secondary expense-correct-btn" data-id="${r.id}" style="background:var(--bg3);color:var(--text2);">✏️ Correct</button>
+        </div>
+      </div>
+      <div id="expense-correct-form-${r.id}"></div>
+    </div>
+  `;
+}
+
+function attachReviewRowHandlers(reviewRows) {
+  document.querySelectorAll('.expense-confirm-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      const { error } = await sb.from('expense_log').update({ status: 'confirmed' }).eq('id', btn.dataset.id);
+      if (error) { alert('Could not confirm — try again.'); btn.disabled = false; return; }
+      renderExpensesTab();
+    });
+  });
+
+  document.querySelectorAll('.expense-correct-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const row = reviewRows.find(r => r.id === btn.dataset.id);
+      if (row) openCorrectExpenseForm(row);
+    });
+  });
+}
+
+function openCorrectExpenseForm(row) {
+  const wrap = document.getElementById(`expense-correct-form-${row.id}`);
+  if (!wrap) return;
+  if (wrap.innerHTML.trim()) { wrap.innerHTML = ''; return; } // toggle closed if already open
+
+  wrap.innerHTML = `
+    <form class="expense-correct-form" style="display:flex;flex-direction:column;gap:8px;margin-top:10px;padding-top:10px;border-top:0.5px solid var(--amber-border);">
+      <div class="settings-grid">
+        <div class="settings-field"><label>Vendor</label><input type="text" name="vendor" value="${escapeHtml(row.vendor || '')}" /></div>
+        <div class="settings-field"><label>Amount</label><input type="text" name="amount" value="${row.amount ?? ''}" /></div>
+        <div class="settings-field"><label>Date</label><input type="date" name="expense_date" value="${row.expense_date || todayISO()}" /></div>
+        <div class="settings-field">
+          <label>Category</label>
+          <select name="category" style="width:100%;background:var(--bg3);border:0.5px solid var(--border);border-radius:7px;padding:7px 10px;font-size:12px;color:var(--text2);">
+            <option value="">—</option>
+            ${EXPENSE_CATEGORIES.map(c => `<option value="${c}" ${row.category === c ? 'selected' : ''}>${c}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button type="submit" class="btn-secondary">Save correction</button>
+      </div>
+      <div class="expense-correct-error" style="font-size:11px;color:var(--red);"></div>
+    </form>
+  `;
+
+  wrap.querySelector('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const errorEl = wrap.querySelector('.expense-correct-error');
+    const amount = parseFloat(fd.get('amount'));
+    if (!fd.get('vendor') || isNaN(amount) || amount <= 0 || !fd.get('expense_date') || !fd.get('category')) {
+      errorEl.textContent = 'All fields are required, amount must be a positive number.';
+      return;
+    }
+    await submitExpenseCorrection(row, {
+      vendor: fd.get('vendor').trim(),
+      amount,
+      expense_date: fd.get('expense_date'),
+      category: fd.get('category'),
+      currency: row.currency || 'CAD',
+    });
+  });
+}
+
+async function submitExpenseCorrection(original, corrected) {
+  const { data: inserted, error: insertError } = await sb.from('expense_log').insert({
+    ...corrected,
+    source: 'manual_correction',
+    status: 'confirmed',
+    corrects_id: original.id,
+  }).select().single();
+
+  if (insertError) { alert('Could not save correction — try again.'); return; }
+
+  const { error: updateError } = await sb.from('expense_log').update({ status: 'superseded' }).eq('id', original.id);
+  if (updateError) console.error('Could not mark original superseded:', updateError.message);
+
+  renderExpensesTab();
+}
+
+function attachExpenseAddHandlers() {
+  const btn = document.getElementById('expense-add-btn');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    const wrap = document.getElementById('expense-add-form-wrap');
+    if (wrap.innerHTML.trim()) { wrap.innerHTML = ''; return; }
+    wrap.innerHTML = `
+      <form id="expense-manual-form" style="display:flex;flex-direction:column;gap:10px;margin-bottom:14px;padding-bottom:14px;border-bottom:0.5px solid var(--border2);">
+        <div class="settings-grid">
+          <div class="settings-field"><label>Vendor</label><input type="text" name="vendor" required /></div>
+          <div class="settings-field"><label>Amount</label><input type="text" name="amount" required /></div>
+          <div class="settings-field"><label>Date</label><input type="date" name="expense_date" value="${todayISO()}" required /></div>
+          <div class="settings-field">
+            <label>Category</label>
+            <select name="category" required style="width:100%;background:var(--bg3);border:0.5px solid var(--border);border-radius:7px;padding:7px 10px;font-size:12px;color:var(--text2);">
+              <option value="">—</option>
+              ${EXPENSE_CATEGORIES.map(c => `<option value="${c}">${c}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;">
+          <button type="submit" class="btn-secondary">Add expense</button>
+        </div>
+        <div id="expense-manual-error" style="font-size:11px;color:var(--red);"></div>
+      </form>
+    `;
+    document.getElementById('expense-manual-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const errorEl = document.getElementById('expense-manual-error');
+      const amount = parseFloat(fd.get('amount'));
+      if (!fd.get('vendor') || isNaN(amount) || amount <= 0) {
+        errorEl.textContent = 'Enter a vendor and a valid amount.';
+        return;
+      }
+      const { error } = await sb.from('expense_log').insert({
+        vendor: fd.get('vendor').trim(),
+        amount,
+        expense_date: fd.get('expense_date'),
+        category: fd.get('category') || null,
+        currency: 'CAD',
+        source: 'manual',
+        status: 'confirmed',
+      });
+      if (error) { errorEl.textContent = 'Could not save — try again.'; return; }
+      renderExpensesTab();
+    });
+  });
+}
+
+const EXPENSE_CHARTS = {};
+
+function renderExpenseCharts(categoryRows, trendRows) {
+  Object.values(EXPENSE_CHARTS).forEach(c => c?.destroy());
+
+  const textColor = '#888888';
+  const gridColor = '#1e1e1e';
+  const palette = ['#534AB7', '#378ADD', '#1D9E75', '#EF9F27', '#E24B4A', '#7F77DD', '#888888', '#F6BF26'];
+
+  const catEl = document.getElementById('expense-category-chart');
+  if (catEl && categoryRows.length) {
+    EXPENSE_CHARTS.category = new Chart(catEl, {
+      type: 'doughnut',
+      data: {
+        labels: categoryRows.map(r => r.category || 'Uncategorized'),
+        datasets: [{ data: categoryRows.map(r => Number(r.total_amount || 0)), backgroundColor: palette }]
+      },
+      options: {
+        plugins: {
+          legend: { position: 'right', labels: { color: textColor, font: { size: 10 }, boxWidth: 10 } },
+          tooltip: { callbacks: { label: ctx => `${ctx.label}: $${ctx.parsed.toLocaleString(undefined, { maximumFractionDigits: 2 })}` } }
+        },
+        responsive: true, maintainAspectRatio: false
+      }
+    });
+  }
+
+  const trendEl = document.getElementById('expense-trend-chart');
+  if (trendEl && trendRows.length) {
+    EXPENSE_CHARTS.trend = new Chart(trendEl, {
+      type: 'bar',
+      data: {
+        labels: trendRows.map(r => new Date(r.month + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', year: '2-digit' })),
+        datasets: [{ data: trendRows.map(r => Number(r.total_amount || 0)), backgroundColor: '#7F77DD', borderRadius: 4 }]
+      },
+      options: {
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => '$' + ctx.parsed.y.toLocaleString(undefined, { maximumFractionDigits: 2 }) } } },
+        scales: {
+          x: { ticks: { color: textColor, font: { size: 10 } }, grid: { display: false } },
+          y: { ticks: { color: textColor, font: { size: 10 }, callback: v => '$' + v }, grid: { color: gridColor } }
+        },
+        responsive: true, maintainAspectRatio: false
+      }
+    });
+  }
+}
 
 async function initApp() {
   try {
