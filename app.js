@@ -3749,6 +3749,7 @@ async function renderExpensesTab() {
   if (!user) return;
 
   const thisMonth = firstOfMonthISO();
+  const monthLabel = new Date(thisMonth + 'T00:00:00').toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
 
   const [categoryRows, trendRows, reviewRows, recentRows] = await Promise.all([
     safeQuery(sb.from('expense_by_category_monthly').select('*').eq('month', thisMonth)),
@@ -3764,14 +3765,17 @@ async function renderExpensesTab() {
   container.innerHTML = `
     <div class="card">
       <div class="card-header">
-        <p class="card-title" style="margin-bottom:0;">Expenses</p>
+        <div>
+          <p class="card-title" style="margin-bottom:2px;">Expenses</p>
+          <p class="card-meta">${monthLabel}</p>
+        </div>
         <button class="btn-secondary" id="expense-add-btn">+ Add expense</button>
       </div>
       <div id="expense-add-form-wrap"></div>
       <div class="stat-grid-3">
         <div class="stat-box">
           <div class="stat-box-value">$${monthTotal.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
-          <div class="stat-box-label">This month</div>
+          <div class="stat-box-label">${monthLabel}</div>
         </div>
         <div class="stat-box">
           <div class="stat-box-value">${monthCount}</div>
@@ -3793,7 +3797,7 @@ async function renderExpensesTab() {
 
     <div class="two-col">
       <div class="card">
-        <p class="card-title">This month by category</p>
+        <p class="card-title">${monthLabel} by category</p>
         <div class="chart-wrap-sm"><canvas id="expense-category-chart"></canvas></div>
       </div>
       <div class="card">
