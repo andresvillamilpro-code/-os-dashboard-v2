@@ -3816,7 +3816,12 @@ async function renderExpensesTab() {
 
   if (reviewCount) {
     const listEl = document.getElementById('expense-review-list');
-    listEl.innerHTML = reviewRows.map(r => renderReviewRow(r)).join('');
+    const duplicateOriginalIds = [...new Set(reviewRows.filter(r => r.duplicate_of).map(r => r.duplicate_of))];
+    const originals = duplicateOriginalIds.length
+      ? await safeQuery(sb.from('expense_log').select('id,vendor,amount,expense_date,currency').in('id', duplicateOriginalIds))
+      : [];
+    const originalsById = Object.fromEntries(originals.map(o => [o.id, o]));
+    listEl.innerHTML = reviewRows.map(r => renderReviewRow(r, originalsById[r.duplicate_of])).join('');
     attachReviewRowHandlers(reviewRows);
   }
 
@@ -3837,8 +3842,26 @@ function renderExpenseRow(r) {
   `;
 }
 
-function renderReviewRow(r) {
+function renderReviewRow(r, original) {
   const amountLabel = r.amount != null ? `$${Number(r.amount).toFixed(2)} ${r.currency || ''}`.trim() : 'missing amount';
+
+  if (r.duplicate_of) {
+    const origLabel = original
+      ? `${escapeHtml(original.vendor || '(unknown)')} — $${Number(original.amount).toFixed(2)} ${original.currency || ''} on ${original.expense_date}`
+      : 'an existing entry';
+    return `
+      <div class="card" style="background:var(--amber-bg);border:0.5px solid var(--amber-border);margin-bottom:8px;" data-review-id="${r.id}">
+        <div style="font-size:12px;font-weight:500;color:var(--text2);">⚠️ Possible duplicate</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:4px;">New: ${escapeHtml(r.vendor || '(unknown vendor)')} — ${amountLabel} on ${r.expense_date || 'no date'}</div>
+        <div style="font-size:11px;color:var(--text4);margin-top:2px;">Matches: ${origLabel}</div>
+        <div style="display:flex;gap:6px;margin-top:10px;">
+          <button type="button" class="btn-secondary expense-delete-dup-btn" data-id="${r.id}" style="background:var(--red);">🗑 Delete this one</button>
+          <button type="button" class="btn-secondary expense-keep-both-btn" data-id="${r.id}" style="background:var(--bg3);color:var(--text2);">Keep both — not a duplicate</button>
+        </div>
+      </div>
+    `;
+  }
+
   return `
     <div class="card" style="background:var(--amber-bg);border:0.5px solid var(--amber-border);margin-bottom:8px;" data-review-id="${r.id}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
@@ -3870,6 +3893,28 @@ function attachReviewRowHandlers(reviewRows) {
     btn.addEventListener('click', () => {
       const row = reviewRows.find(r => r.id === btn.dataset.id);
       if (row) openCorrectExpenseForm(row);
+    });
+  });
+
+  // Duplicate resolution — only rows with duplicate_of set are ever deletable;
+  // this relies entirely on the narrow DELETE policy in the database, not
+  // just on this button existing.
+  document.querySelectorAll('.expense-delete-dup-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Permanently delete this duplicate entry? This cannot be undone.')) return;
+      btn.disabled = true;
+      const { error } = await sb.from('expense_log').delete().eq('id', btn.dataset.id);
+      if (error) { alert('Could not delete — try again.'); btn.disabled = false; return; }
+      renderExpensesTab();
+    });
+  });
+
+  document.querySelectorAll('.expense-keep-both-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      const { error } = await sb.from('expense_log').update({ status: 'confirmed', duplicate_of: null }).eq('id', btn.dataset.id);
+      if (error) { alert('Could not update — try again.'); btn.disabled = false; return; }
+      renderExpensesTab();
     });
   });
 }
