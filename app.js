@@ -3809,7 +3809,8 @@ async function renderExpensesTab() {
 
     <div class="card">
       <p class="card-title">Recent expenses</p>
-      <div id="expense-recent-list">
+      ${recentRows.length ? '<div class="chart-wrap-sm"><canvas id="expense-recent-chart"></canvas></div>' : ''}
+      <div id="expense-recent-list" style="margin-top:10px;">
         ${recentRows.length ? recentRows.map(r => renderExpenseRow(r)).join('') : '<p class="empty-state">No confirmed expenses yet.</p>'}
       </div>
     </div>
@@ -3826,7 +3827,7 @@ async function renderExpensesTab() {
     attachReviewRowHandlers(reviewRows);
   }
 
-  renderExpenseCharts(categoryRows, allCategoryRows);
+  renderExpenseCharts(categoryRows, allCategoryRows, recentRows);
   attachExpenseAddHandlers();
   attachRecentExpenseHandlers(recentRows);
 }
@@ -4065,7 +4066,7 @@ const CATEGORY_COLORS = {
   'Trading Expenses': '#F6BF26',
 };
 
-function renderExpenseCharts(categoryRows, allCategoryRows) {
+function renderExpenseCharts(categoryRows, allCategoryRows, recentRows) {
   Object.values(EXPENSE_CHARTS).forEach(c => c?.destroy());
 
   const textColor = '#888888';
@@ -4123,6 +4124,43 @@ function renderExpenseCharts(categoryRows, allCategoryRows) {
         scales: {
           x: { stacked: true, ticks: { color: textColor, font: { size: 10 } }, grid: { display: false } },
           y: { stacked: true, ticks: { color: textColor, font: { size: 10 }, callback: v => '$' + v }, grid: { color: gridColor } }
+        },
+        responsive: true, maintainAspectRatio: false
+      }
+    });
+  }
+
+  // One bar per recent transaction, colored by category — same color
+  // mapping as the other two charts, so a "Transport" bar here matches
+  // "Transport" everywhere else on the tab.
+  const recentEl = document.getElementById('expense-recent-chart');
+  if (recentEl && recentRows && recentRows.length) {
+    const ordered = [...recentRows].reverse(); // oldest-to-newest, left-to-right
+    EXPENSE_CHARTS.recent = new Chart(recentEl, {
+      type: 'bar',
+      data: {
+        labels: ordered.map(r => r.vendor || '(unknown)'),
+        datasets: [{
+          data: ordered.map(r => Number(r.amount || 0)),
+          backgroundColor: ordered.map(r => CATEGORY_COLORS[r.category] || '#888888'),
+          borderRadius: 4,
+        }]
+      },
+      options: {
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: ctx => {
+                const r = ordered[ctx.dataIndex];
+                return `${r.category || 'Uncategorized'}: $${Number(r.amount).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+              }
+            }
+          }
+        },
+        scales: {
+          x: { ticks: { color: textColor, font: { size: 9 }, maxRotation: 45, minRotation: 45 }, grid: { display: false } },
+          y: { ticks: { color: textColor, font: { size: 10 }, callback: v => '$' + v }, grid: { color: gridColor } }
         },
         responsive: true, maintainAspectRatio: false
       }
