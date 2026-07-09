@@ -3750,14 +3750,15 @@ async function renderExpensesTab() {
 
   const thisMonth = firstOfMonthISO();
   const monthLabel = new Date(thisMonth + 'T00:00:00').toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  const twelveMonthsAgo = isoDate(new Date(new Date(thisMonth + 'T00:00:00').getFullYear(), new Date(thisMonth + 'T00:00:00').getMonth() - 11, 1));
 
-  const [categoryRows, trendRows, reviewRows, recentRows] = await Promise.all([
-    safeQuery(sb.from('expense_by_category_monthly').select('*').eq('month', thisMonth)),
-    safeQuery(sb.from('expense_monthly_trend').select('*').order('month', { ascending: true }).limit(12)),
+  const [allCategoryRows, reviewRows, recentRows] = await Promise.all([
+    safeQuery(sb.from('expense_by_category_monthly').select('*').gte('month', twelveMonthsAgo).order('month', { ascending: true })),
     safeQuery(sb.from('expense_log').select('*').eq('status', 'needs_review').order('created_at', { ascending: false })),
     safeQuery(sb.from('expense_log').select('*').eq('status', 'confirmed').order('expense_date', { ascending: false }).limit(20)),
   ]);
 
+  const categoryRows = allCategoryRows.filter(r => r.month === thisMonth);
   const monthTotal = categoryRows.reduce((s, r) => s + Number(r.total_amount || 0), 0);
   const monthCount = categoryRows.reduce((s, r) => s + Number(r.transaction_count || 0), 0);
   const reviewCount = reviewRows.length;
@@ -3825,19 +3826,37 @@ async function renderExpensesTab() {
     attachReviewRowHandlers(reviewRows);
   }
 
-  renderExpenseCharts(categoryRows, trendRows);
+  renderExpenseCharts(categoryRows, allCategoryRows);
   attachExpenseAddHandlers();
+  attachRecentExpenseHandlers(recentRows);
+}
+
+// Edit button on any already-logged (confirmed) expense — reuses the same
+// correction form/flow as the review queue's "Correct" action: inserts a
+// new corrected row with corrects_id, marks the original superseded. No
+// direct edit of amount/vendor/category ever happens on an existing row.
+function attachRecentExpenseHandlers(recentRows) {
+  document.querySelectorAll('.expense-edit-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const row = recentRows.find(r => r.id === btn.dataset.id);
+      if (row) openCorrectExpenseForm(row);
+    });
+  });
 }
 
 function renderExpenseRow(r) {
   const dateLabel = r.expense_date || '—';
   const amountLabel = r.amount != null ? `$${Number(r.amount).toFixed(2)} ${r.currency || ''}`.trim() : '—';
   return `
-    <div class="check-row">
-      <span class="check-label" style="min-width:80px;color:var(--text4);">${dateLabel}</span>
-      <span class="check-label" style="flex:1;">${escapeHtml(r.vendor || '(unknown vendor)')}</span>
-      <span class="check-label" style="min-width:110px;color:var(--text3);">${escapeHtml(r.category || '—')}</span>
-      <span class="check-label" style="min-width:90px;text-align:right;font-weight:500;">${amountLabel}</span>
+    <div>
+      <div class="check-row">
+        <span class="check-label" style="min-width:80px;color:var(--text4);">${dateLabel}</span>
+        <span class="check-label" style="flex:1;">${escapeHtml(r.vendor || '(unknown vendor)')}</span>
+        <span class="check-label" style="min-width:110px;color:var(--text3);">${escapeHtml(r.category || '—')}</span>
+        <span class="check-label" style="min-width:90px;text-align:right;font-weight:500;">${amountLabel}</span>
+        <span class="expense-edit-btn" data-id="${r.id}" title="Edit" style="cursor:pointer;color:var(--text4);font-size:12px;padding:2px 6px;">✏️</span>
+      </div>
+      <div id="expense-correct-form-${r.id}"></div>
     </div>
   `;
 }
@@ -4032,12 +4051,25 @@ function attachExpenseAddHandlers() {
 
 const EXPENSE_CHARTS = {};
 
-function renderExpenseCharts(categoryRows, trendRows) {
+// Fixed color per category — used by both charts so "Transport" is always
+// the same color whether you're looking at this month's doughnut or the
+// 12-month trend.
+const CATEGORY_COLORS = {
+  'Groceries': '#534AB7',
+  'Restaurants': '#378ADD',
+  'Subscriptions': '#1D9E75',
+  'Leisure/Entertainment': '#EF9F27',
+  'Transport': '#E24B4A',
+  'Phone & Utilities': '#7F77DD',
+  'Health': '#888888',
+  'Trading Expenses': '#F6BF26',
+};
+
+function renderExpenseCharts(categoryRows, allCategoryRows) {
   Object.values(EXPENSE_CHARTS).forEach(c => c?.destroy());
 
   const textColor = '#888888';
   const gridColor = '#1e1e1e';
-  const palette = ['#534AB7', '#378ADD', '#1D9E75', '#EF9F27', '#E24B4A', '#7F77DD', '#888888', '#F6BF26'];
 
   const catEl = document.getElementById('expense-category-chart');
   if (catEl && categoryRows.length) {
@@ -4045,7 +4077,10 @@ function renderExpenseCharts(categoryRows, trendRows) {
       type: 'doughnut',
       data: {
         labels: categoryRows.map(r => r.category || 'Uncategorized'),
-        datasets: [{ data: categoryRows.map(r => Number(r.total_amount || 0)), backgroundColor: palette }]
+        datasets: [{
+          data: categoryRows.map(r => Number(r.total_amount || 0)),
+          backgroundColor: categoryRows.map(r => CATEGORY_COLORS[r.category] || '#888888')
+        }]
       },
       options: {
         plugins: {
@@ -4057,19 +4092,37 @@ function renderExpenseCharts(categoryRows, trendRows) {
     });
   }
 
+  // Stacked bar — one segment per category per month, instead of a single
+  // combined total, so you can see the composition of spending over time.
   const trendEl = document.getElementById('expense-trend-chart');
-  if (trendEl && trendRows.length) {
+  if (trendEl && allCategoryRows.length) {
+    const months = [...new Set(allCategoryRows.map(r => r.month))].sort();
+    const categoriesPresent = EXPENSE_CATEGORIES.filter(cat =>
+      allCategoryRows.some(r => r.category === cat && Number(r.total_amount) > 0)
+    );
+
     EXPENSE_CHARTS.trend = new Chart(trendEl, {
       type: 'bar',
       data: {
-        labels: trendRows.map(r => new Date(r.month + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', year: '2-digit' })),
-        datasets: [{ data: trendRows.map(r => Number(r.total_amount || 0)), backgroundColor: '#7F77DD', borderRadius: 4 }]
+        labels: months.map(m => new Date(m + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', year: '2-digit' })),
+        datasets: categoriesPresent.map(cat => ({
+          label: cat,
+          data: months.map(m => Number(allCategoryRows.find(r => r.month === m && r.category === cat)?.total_amount || 0)),
+          backgroundColor: CATEGORY_COLORS[cat] || '#888888',
+        }))
       },
       options: {
-        plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => '$' + ctx.parsed.y.toLocaleString(undefined, { maximumFractionDigits: 2 }) } } },
+        plugins: {
+          legend: { position: 'bottom', labels: { color: textColor, font: { size: 9 }, boxWidth: 8, padding: 8 } },
+          tooltip: {
+            callbacks: {
+              label: ctx => `${ctx.dataset.label}: $${ctx.parsed.y.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+            }
+          }
+        },
         scales: {
-          x: { ticks: { color: textColor, font: { size: 10 } }, grid: { display: false } },
-          y: { ticks: { color: textColor, font: { size: 10 }, callback: v => '$' + v }, grid: { color: gridColor } }
+          x: { stacked: true, ticks: { color: textColor, font: { size: 10 } }, grid: { display: false } },
+          y: { stacked: true, ticks: { color: textColor, font: { size: 10 }, callback: v => '$' + v }, grid: { color: gridColor } }
         },
         responsive: true, maintainAspectRatio: false
       }
