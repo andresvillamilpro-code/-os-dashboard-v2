@@ -4130,36 +4130,34 @@ function renderExpenseCharts(categoryRows, allCategoryRows, recentRows) {
     });
   }
 
-  // One bar per recent transaction, colored by category — same color
-  // mapping as the other two charts, so a "Transport" bar here matches
-  // "Transport" everywhere else on the tab.
+  // One bar per category (summed across the recent transactions), not one
+  // bar per individual transaction.
   const recentEl = document.getElementById('expense-recent-chart');
   if (recentEl && recentRows && recentRows.length) {
-    const ordered = [...recentRows].reverse(); // oldest-to-newest, left-to-right
+    const totalsByCategory = {};
+    recentRows.forEach(r => {
+      const cat = r.category || 'Uncategorized';
+      totalsByCategory[cat] = (totalsByCategory[cat] || 0) + Number(r.amount || 0);
+    });
+    const categories = Object.keys(totalsByCategory).sort((a, b) => totalsByCategory[b] - totalsByCategory[a]);
+
     EXPENSE_CHARTS.recent = new Chart(recentEl, {
       type: 'bar',
       data: {
-        labels: ordered.map(r => r.vendor || '(unknown)'),
+        labels: categories,
         datasets: [{
-          data: ordered.map(r => Number(r.amount || 0)),
-          backgroundColor: ordered.map(r => CATEGORY_COLORS[r.category] || '#888888'),
+          data: categories.map(c => totalsByCategory[c]),
+          backgroundColor: categories.map(c => CATEGORY_COLORS[c] || '#888888'),
           borderRadius: 4,
         }]
       },
       options: {
         plugins: {
           legend: { display: false },
-          tooltip: {
-            callbacks: {
-              label: ctx => {
-                const r = ordered[ctx.dataIndex];
-                return `${r.category || 'Uncategorized'}: $${Number(r.amount).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-              }
-            }
-          }
+          tooltip: { callbacks: { label: ctx => `$${ctx.parsed.y.toLocaleString(undefined, { maximumFractionDigits: 2 })}` } }
         },
         scales: {
-          x: { ticks: { color: textColor, font: { size: 9 }, maxRotation: 45, minRotation: 45 }, grid: { display: false } },
+          x: { ticks: { color: textColor, font: { size: 10 } }, grid: { display: false } },
           y: { ticks: { color: textColor, font: { size: 10 }, callback: v => '$' + v }, grid: { color: gridColor } }
         },
         responsive: true, maintainAspectRatio: false
