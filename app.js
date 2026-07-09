@@ -2512,8 +2512,19 @@ async function renderFitnessTab() {
   const weightToGo    = currentWeight ? Math.max(0, WEIGHT_GOAL_LBS - currentWeight) : null;
 
   // ── Photos ──
-  const frontPhoto = photoRows.find(r => r.photo_type === 'front');
-  const backPhoto  = photoRows.find(r => r.photo_type === 'back');
+  // fitness-photos is a private bucket, so getPublicUrl() (used at upload
+  // time previously) produced a URL that looks valid but 403s when the
+  // <img> tag actually tries to load it — the upload silently "worked" but
+  // the photo could never actually display. Signed URLs are the correct
+  // access method for a private bucket; generated fresh on every render
+  // (1 hour expiry) rather than stored, so they never go stale.
+  let frontPhoto = photoRows.find(r => r.photo_type === 'front');
+  let backPhoto  = photoRows.find(r => r.photo_type === 'back');
+  await Promise.all([frontPhoto, backPhoto].filter(Boolean).map(async (photo) => {
+    if (!photo.path) return;
+    const { data: signedData } = await sb.storage.from('fitness-photos').createSignedUrl(photo.path, 3600);
+    if (signedData?.signedUrl) photo.url = signedData.signedUrl;
+  }));
 
   // ── Week status message ──
   let weekStatus, weekStatusColor;
@@ -2896,17 +2907,30 @@ function attachPhotoHandlers(weekStart) {
       const file = e.target.files?.[0];
       const photo_type = e.target.dataset.photoType;
       if (!file) return;
+
+      const label = e.target.closest('label');
+      const originalContent = label ? label.innerHTML : null;
+      if (label) label.innerHTML = '<div style="font-size:11px;color:var(--text4);padding:20px;text-align:center;">Uploading…</div>';
+
       const ext = file.name.split('.').pop() || 'jpg';
       const path = `${weekStart}/${photo_type}.${ext}`;
       const { error } = await sb.storage.from('fitness-photos').upload(path, file, { upsert: true });
-      if (error) { console.error('Photo upload error:', error.message); return; }
-      const { data: urlData } = sb.storage.from('fitness-photos').getPublicUrl(path);
+      if (error) {
+        console.error('Photo upload error:', error.message);
+        alert(`Could not upload photo: ${error.message}`);
+        if (label && originalContent) label.innerHTML = originalContent;
+        return;
+      }
+      // Note: no getPublicUrl() here — fitness-photos is a private bucket,
+      // so that would produce a URL that looks valid but never actually
+      // loads. renderFitnessTab() generates a proper signed URL on each
+      // render instead; this just needs to store the path.
       const { data: existing } = await sb.from('fitness_photos').select('id')
         .eq('week_start', weekStart).eq('photo_type', photo_type).maybeSingle();
       if (existing) {
-        await sb.from('fitness_photos').update({ url: urlData.publicUrl, path }).eq('id', existing.id);
+        await sb.from('fitness_photos').update({ path }).eq('id', existing.id);
       } else {
-        await sb.from('fitness_photos').insert({ week_start: weekStart, photo_type, url: urlData.publicUrl, path, user_id: (await sb.auth.getUser()).data.user?.id });
+        await sb.from('fitness_photos').insert({ week_start: weekStart, photo_type, path, user_id: (await sb.auth.getUser()).data.user?.id });
       }
       renderFitnessTab();
     });
