@@ -46,14 +46,29 @@ const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
 
 const MISSION_STATEMENT = '"No discipline seems pleasant at the time, but painful. Later on, however, it produces a harvest of righteousness and peace for those who have been trained by it." — Hebrews 12:11';
 
-const MORNING_ROUTINE_ITEMS = [
-  'Wake before 6am',
-  'Stretch 5 min',
-  'Walk 10 min',
-  'Pray and bible study',
-  'Journal morning',
-  '1 glass of water'
-];
+// Wake time differs by day type — weekends allow a later wake-up. Rather
+// than one fixed list, this is a function of the date, so the correct item
+// ("Wake before 6am" weekdays, "Wake before 9am" Sat/Sun) is shown and
+// logged under its own item_name for that day.
+function isWeekendDate(dateStr) {
+  const day = new Date(dateStr + 'T12:00:00').getDay();
+  return day === 0 || day === 6;
+}
+
+function morningRoutineItemsForDate(dateStr) {
+  const wakeItem = isWeekendDate(dateStr) ? 'Wake before 9am' : 'Wake before 6am';
+  return [wakeItem, 'Stretch 5 min', 'Walk 10 min', 'Pray and bible study', 'Journal morning', '1 glass of water'];
+}
+
+// Zinc is taken every 2 days — this flips on/off by calendar day-of-year,
+// so it's fully deterministic forever without needing to store any
+// "last taken" state anywhere.
+function isZincDay(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00');
+  const start = new Date(d.getFullYear(), 0, 1);
+  const dayOfYear = Math.floor((d - start) / 86400000) + 1;
+  return dayOfYear % 2 === 0;
+}
 
 // Consistency items are now dynamic — stored in the `consistency_items` table
 // (item_name, is_system, active, sort_order) instead of hardcoded here.
@@ -112,7 +127,7 @@ async function deleteConsistencyItem(itemName) {
 
 // Single-user app — email is fixed internally so the login screen only
 // asks for the password. Replace this before deploying.
-const LOGIN_EMAIL = 'andresvillamilpro@gmail.com';
+const LOGIN_EMAIL = 'REPLACE_WITH_YOUR_EMAIL@example.com';
 
 async function getCurrentUser() {
   const { data, error } = await sb.auth.getUser();
@@ -331,13 +346,19 @@ async function renderDailyTab() {
   if (!user) return;
 
   const today = todayISO();
+  const morningItems = morningRoutineItemsForDate(today);
 
-  const consistencyItems = await loadConsistencyItems();
+  const rawConsistencyItems = await loadConsistencyItems();
+  // Zinc is only taken every 2 days — hide it from the checklist entirely
+  // on days it's not due, rather than showing it unchecked every day.
+  const consistencyItems = isZincDay(today)
+    ? rawConsistencyItems
+    : rawConsistencyItems.filter(r => r.item_name !== 'Zinc');
   const consistencyItemNames = consistencyItems.map(r => r.item_name);
 
   const [snapshot, routine, consistency, goals, tasks] = await Promise.all([
     loadTradingSnapshot(),
-    loadChecklist('morning_routine_log', MORNING_ROUTINE_ITEMS, today),
+    loadChecklist('morning_routine_log', morningItems, today),
     loadChecklist('consistency_log', consistencyItemNames, today),
     loadTopGoals(today),
     loadTasks()
@@ -355,11 +376,11 @@ async function renderDailyTab() {
     ${renderTradingSnapshotBox(snapshot)}
   `;
 
-  attachChecklistHandlers('morning_routine_log', 'morning-routine', MORNING_ROUTINE_ITEMS);
+  attachChecklistHandlers('morning_routine_log', 'morning-routine', morningItems);
   attachChecklistHandlers('consistency_log', 'consistency', consistencyItemNames);
   attachConsistencyEditHandlers();
   attachTopGoalsHandlers();
-  attachTaskListHandlers();
+  attachTaskListHandlers(tasks);
   initGoogleCalendar();
 }
 
@@ -669,11 +690,15 @@ function renderTaskListCard(tasks) {
   const deleteBtn = (id) =>
     `<span data-task-delete="${id}" style="font-size:11px;color:var(--text4);cursor:pointer;padding:2px 6px;border-radius:4px;border:0.5px solid var(--border2);flex-shrink:0;">✕</span>`;
 
+  const priorityBtn = (id) =>
+    `<span data-task-priority="${id}" title="Make this a Top 3 priority" style="font-size:11px;color:var(--purple-light);cursor:pointer;padding:2px 6px;border-radius:4px;border:0.5px solid var(--purple-border);flex-shrink:0;">⭐</span>`;
+
   // Active tasks
   const activeRows = active.map(t => `
     <div class="check-row" data-task-id="${t.id}">
       <input type="checkbox" data-task-check="${t.id}" />
       <label class="check-label" style="flex:1;">${escapeHtml(t.text)}</label>
+      ${priorityBtn(t.id)}
       ${deleteBtn(t.id)}
     </div>`).join('');
 
@@ -749,7 +774,29 @@ function toggleWeekTasks() {
   if (arrow) arrow.textContent = isOpen ? '▶' : '▼';
 }
 
-function attachTaskListHandlers() {
+// Promotes a task's text into the first empty Top 3 Goals slot for today.
+// If all 3 are already filled, asks you to clear one first rather than
+// silently overwriting an existing priority.
+async function promoteTaskToGoal(taskText) {
+  const today = todayISO();
+  const goals = await loadTopGoals(today);
+  const emptySlot = goals.find(g => !g.text.trim());
+  if (!emptySlot) {
+    alert('All 3 Top Goal slots are full — clear one first.');
+    return;
+  }
+  const { data: { user } } = await sb.auth.getUser();
+  const { data: existing } = await sb.from('top_goals').select('id')
+    .eq('log_date', today).eq('slot', emptySlot.slot).maybeSingle();
+  if (existing) {
+    await sb.from('top_goals').update({ text: taskText }).eq('id', existing.id);
+  } else {
+    await sb.from('top_goals').insert({ log_date: today, slot: emptySlot.slot, text: taskText, user_id: user?.id });
+  }
+  renderDailyTab();
+}
+
+function attachTaskListHandlers(tasks) {
   const list = document.getElementById('task-list');
   const form = document.getElementById('add-task-form');
   if (!list || !form) return;
@@ -759,6 +806,14 @@ function attachTaskListHandlers() {
       const id = e.target.dataset.taskDelete;
       await sb.from('tasks').delete().eq('id', id);
       renderDailyTab();
+    });
+  });
+
+  list.querySelectorAll('[data-task-priority]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      const id = e.target.dataset.taskPriority;
+      const task = tasks?.active?.find(t => t.id === id);
+      if (task) await promoteTaskToGoal(task.text);
     });
   });
 
@@ -2506,6 +2561,7 @@ async function renderFitnessTab() {
   // ── Supplements synced with Daily ──
   const suppMap = {};
   supplementsToday.forEach(r => { suppMap[r.item_name] = r.completed; });
+  const supplementItemsToday = isZincDay(today) ? SUPPLEMENT_ITEMS : SUPPLEMENT_ITEMS.filter(i => i !== 'Zinc');
 
   // ── Weight & goal ──
   const weightGoalPct = currentWeight ? Math.min(100, (currentWeight / WEIGHT_GOAL_LBS) * 100) : 0;
@@ -2581,7 +2637,7 @@ async function renderFitnessTab() {
         <span class="card-meta">Synced with Daily tab</span>
       </div>
       <div id="fitness-supplements-list">
-        ${SUPPLEMENT_ITEMS.map((item, idx) => `
+        ${supplementItemsToday.map((item, idx) => `
           <div class="check-row">
             <input type="checkbox" data-idx="${idx}" ${suppMap[item] ? 'checked' : ''} />
             <label class="check-label">${escapeHtml(item)}</label>
@@ -2684,7 +2740,7 @@ async function renderFitnessTab() {
   attachCardioGridHandlers(thisWeek);
   attachStrengthHandlers();
   attachWeightSleepHandlers(thisWeek, thisWeekDates);
-  attachChecklistHandlers('consistency_log', 'fitness-supplements', SUPPLEMENT_ITEMS);
+  attachChecklistHandlers('consistency_log', 'fitness-supplements', supplementItemsToday);
   attachPhotoHandlers(thisWeek);
   attachFitnessSessionHandlers(thisWeek, weekData);
   updateFitnessScorePreview();
@@ -3397,6 +3453,36 @@ async function calcChecklistGroupStats(table, itemNames) {
   return { score, trend, hasAnyData };
 }
 
+// Like calcChecklistGroupStats, but the expected item list varies per day
+// (weekday vs weekend wake-time item) instead of being one fixed list.
+async function calcMorningRoutineGroupStats() {
+  const todayStr = todayISO();
+  const startStr = addDaysISO(todayStr, -29);
+  const { data } = await sb.from('morning_routine_log').select('log_date, item_name, completed')
+    .gte('log_date', startStr).lte('log_date', todayStr);
+  const byDate = {};
+  (data || []).forEach(r => {
+    if (!byDate[r.log_date]) byDate[r.log_date] = {};
+    byDate[r.log_date][r.item_name] = r.completed;
+  });
+  const hasAnyData = Object.keys(byDate).length > 0;
+  const days = [];
+  for (let i = 0; i < 30; i++) days.push(addDaysISO(todayStr, -29 + i));
+  const dayRate = (d) => {
+    const entry = byDate[d];
+    if (!entry) return 0;
+    const expected = morningRoutineItemsForDate(d);
+    const done = expected.filter(n => entry[n]).length;
+    return done / expected.length;
+  };
+  const avg = (list) => list.reduce((s, d) => s + dayRate(d), 0) / list.length;
+  const last30Rate = avg(days);
+  const last7Rate = avg(days.slice(-7));
+  const score = hasAnyData ? Math.round((0.6 * last7Rate + 0.4 * last30Rate) * 100) : 0;
+  const trend = !hasAnyData ? 'no_data' : last7Rate > last30Rate + 0.05 ? 'up' : last7Rate < last30Rate - 0.05 ? 'down' : 'stable';
+  return { score, trend, hasAnyData };
+}
+
 // Items from consistency_log that feed the Discipline System goal.
 // Pulled live from consistency_items so newly added custom habits are
 // automatically included — only Family time (Goal 8) and reading are excluded.
@@ -3439,11 +3525,13 @@ async function calcConsistencyGroupStatsForGoal3(itemNames) {
   const dayRate = (d) => {
     const entry = byDate[d];
     if (!entry) return 0;
-    const done = itemNames.filter(n => {
+    const expectedForDay = itemNames.filter(n => n !== 'Zinc' || isZincDay(d));
+    if (!expectedForDay.length) return 1; // nothing was due that day — treat as fully compliant
+    const done = expectedForDay.filter(n => {
       if (n === 'Gym') return entry[n] || walkedByDate[d];
       return entry[n];
     }).length;
-    return done / itemNames.length;
+    return done / expectedForDay.length;
   };
   const avg = (list) => list.reduce((s, d) => s + dayRate(d), 0) / list.length;
   const last30Rate = avg(days);
@@ -3459,7 +3547,7 @@ async function computeDisciplineSystemGoal() {
   const [trading, fitness, morning, systems] = await Promise.all([
     calcSessionScoreStats('trading_sessions', 'session_date', 'discipline_score'),
     calcSessionScoreStats('fitness_daily_session', 'session_date', 'discipline_score', { scale: 100 / FITNESS_DAILY_MAX }),
-    calcChecklistGroupStats('morning_routine_log', MORNING_ROUTINE_ITEMS),
+    calcMorningRoutineGroupStats(),
     consistencySystemItems.length
       ? calcConsistencyGroupStatsForGoal3(consistencySystemItems)
       : Promise.resolve({ score: 0, trend: 'no_data', hasAnyData: false }),
