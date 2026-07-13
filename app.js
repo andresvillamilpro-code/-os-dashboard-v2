@@ -2585,11 +2585,12 @@ function renderTagPicker(fieldId, label) {
             ${escapeHtml(t.tag_name)}
             <span class="tag-remove" data-tag-id="${t.id}" title="Remove from list">×</span>
           </span>
-        `).join('') || '<span class="card-meta">No tags yet — add one below.</span>'}
+        `).join('')}
+        <span class="tag-chip tag-add-toggle" id="${fieldId}-add-toggle" title="Add a new tag">+</span>
       </div>
-      <div class="tag-add-row">
+      <div class="tag-add-row" id="${fieldId}-add-row" style="display:none;">
         <input type="text" id="${fieldId}-new-tag-input" placeholder="Add ${escapeHtml(label.toLowerCase())}..." />
-        <button type="button" class="btn-secondary" id="${fieldId}-add-tag-btn">+ Add</button>
+        <button type="button" class="btn-secondary" id="${fieldId}-add-tag-btn">Add</button>
       </div>
     </div>
   `;
@@ -2600,7 +2601,7 @@ function attachTagPickerHandlers(fieldId) {
   const category = JOURNAL_FIELD_TO_CATEGORY[fieldId];
 
   if (picker) {
-    picker.querySelectorAll('.tag-chip').forEach(chip => {
+    picker.querySelectorAll('.tag-chip:not(.tag-add-toggle)').forEach(chip => {
       chip.addEventListener('click', (e) => {
         if (e.target.classList.contains('tag-remove')) return; // handled separately
         const name = chip.dataset.tagName;
@@ -2622,8 +2623,17 @@ function attachTagPickerHandlers(fieldId) {
     });
   }
 
-  const addBtn = document.getElementById(`${fieldId}-add-tag-btn`);
+  const addToggle = document.getElementById(`${fieldId}-add-toggle`);
+  const addRow = document.getElementById(`${fieldId}-add-row`);
   const input = document.getElementById(`${fieldId}-new-tag-input`);
+  if (addToggle && addRow) {
+    addToggle.addEventListener('click', () => {
+      addRow.style.display = addRow.style.display === 'none' ? 'flex' : 'none';
+      if (addRow.style.display === 'flex' && input) input.focus();
+    });
+  }
+
+  const addBtn = document.getElementById(`${fieldId}-add-tag-btn`);
   if (addBtn && input) {
     const submit = async () => {
       const result = await addJournalTag(category, input.value);
@@ -2648,6 +2658,7 @@ function rerenderJournalForm() {
 function renderJournalEntryForm() {
   return `
     <form id="journal-entry-form">
+      <div class="journal-section-label">Setup</div>
       <div class="journal-grid-3">
         <div class="journal-field"><label>Date</label><input type="date" name="entry_date" value="${todayISO()}" required /></div>
         <div class="journal-field"><label>Asset</label><input type="text" name="asset" placeholder="BTC, NAS100, GOLD..." required /></div>
@@ -2658,41 +2669,37 @@ function renderJournalEntryForm() {
           </select>
         </div>
       </div>
-
-      <div class="journal-grid-3" style="margin-top:10px;">
-        <div class="journal-field"><label>Entry time (optional)</label><input type="time" name="entry_time" /></div>
-        <div class="journal-field"><label>Close time (optional)</label><input type="time" name="close_time" /></div>
+      <div class="journal-grid-2" style="margin-top:10px;">
         <div class="journal-field"><label>Risk %</label><input type="number" step="0.01" name="risk_percent" placeholder="3" required /></div>
+        <div class="journal-field"><label>Entry time (optional)</label><input type="time" name="entry_time" /></div>
       </div>
-
       <div style="margin-top:10px;">${renderTagPicker('jf-timeframe', 'Timeframe')}</div>
 
+      <div class="journal-section-label">Plan — before you entered</div>
+      <div>${renderTagPicker('jf-emotion-before', 'Emotion before')}</div>
+      <div style="margin-top:10px;">${renderTagPicker('jf-setup', 'Trade confirmation / setup')}</div>
       <div class="journal-field" style="margin-top:10px;">
         <label>TradingView links — before (one per line)</label>
         <textarea name="chart_links_before" placeholder="https://www.tradingview.com/x/..."></textarea>
       </div>
 
-      <div style="margin-top:10px;">${renderTagPicker('jf-emotion-before', 'Emotion before')}</div>
-      <div style="margin-top:10px;">${renderTagPicker('jf-setup', 'Trade confirmation / setup')}</div>
-
-      <div class="journal-grid-3" style="margin-top:10px;">
+      <div class="journal-section-label">Execution</div>
+      <div class="journal-grid-3">
         <div class="journal-field"><label>Entry price</label><input type="number" step="any" name="entry_price" required /></div>
         <div class="journal-field"><label>Stop loss</label><input type="number" step="any" name="stop_loss" required /></div>
         <div class="journal-field"><label>Take profit (optional)</label><input type="number" step="any" name="take_profit" /></div>
       </div>
-
-      <div class="journal-field" style="margin-top:10px;">
-        <label>Close price (leave blank if still open)</label>
-        <input type="number" step="any" name="close_price" />
+      <div class="journal-grid-2" style="margin-top:10px;">
+        <div class="journal-field"><label>Close time (optional)</label><input type="time" name="close_time" /></div>
+        <div class="journal-field"><label>Close price (leave blank if still open)</label><input type="number" step="any" name="close_price" /></div>
       </div>
 
-      <div style="margin-top:10px;">${renderTagPicker('jf-emotion-after', 'Emotion after')}</div>
-
+      <div class="journal-section-label">Reflection — after the trade</div>
+      <div>${renderTagPicker('jf-emotion-after', 'Emotion after')}</div>
       <div class="journal-field" style="margin-top:10px;">
         <label>Conclusion / lesson</label>
         <textarea name="conclusion_lesson" placeholder="What happened, what you'd do differently..."></textarea>
       </div>
-
       <div class="journal-field" style="margin-top:10px;">
         <label>TradingView links — after (one per line)</label>
         <textarea name="chart_links_after" placeholder="https://www.tradingview.com/x/..."></textarea>
@@ -2700,7 +2707,7 @@ function renderJournalEntryForm() {
 
       <div id="journal-form-error" style="font-size:11px;color:var(--red);margin-top:8px;"></div>
 
-      <div style="display:flex;gap:8px;margin-top:12px;">
+      <div style="display:flex;gap:8px;margin-top:16px;padding-top:14px;border-top:0.5px solid var(--border2);">
         <button type="submit" class="btn-secondary">Save entry</button>
         <button type="button" class="btn-secondary" id="journal-form-cancel" style="background:var(--bg3);color:var(--text3);">Cancel</button>
       </div>
@@ -2783,21 +2790,72 @@ function formatJournalLinks(text) {
     .join('<br/>');
 }
 
+// ---------- Weekly compilation ----------
+// Groups entries into Mon–Sun buckets (reusing the same week-math already used
+// elsewhere in the app) so history reads as compiled weekly stats you can drill
+// into, rather than one long flat list.
+function groupJournalEntriesByWeek(entries) {
+  const buckets = {}; // weekStartISO -> entries[]
+  entries.forEach(e => {
+    const monday = getMondayOfWeek(new Date(e.entry_date + 'T12:00:00'));
+    const key = isoDate(monday);
+    if (!buckets[key]) buckets[key] = [];
+    buckets[key].push(e);
+  });
+  return Object.keys(buckets)
+    .sort((a, b) => b.localeCompare(a)) // most recent week first
+    .map(weekStart => {
+      const weekEntries = buckets[weekStart].sort((a, b) => b.entry_date.localeCompare(a.entry_date));
+      return { weekStart, label: formatWeekRange(weekStart), entries: weekEntries, stats: computeJournalWeekStats(weekEntries) };
+    });
+}
+
+function computeJournalWeekStats(weekEntries) {
+  let wins = 0, losses = 0, be = 0, netPnl = 0, closedCount = 0;
+  weekEntries.forEach(e => {
+    const m = computeJournalMetrics(e);
+    if (m.result === 'WIN') wins++;
+    else if (m.result === 'LOSS') losses++;
+    else if (m.result === 'BE') be++;
+    if (m.pnlPercent != null) { netPnl += m.pnlPercent; closedCount++; }
+  });
+  const decided = wins + losses; // BE and open trades excluded from win-rate math
+  const winRate = decided ? Math.round((wins / decided) * 100) : null;
+  return { count: weekEntries.length, wins, losses, be, winRate, netPnl, closedCount };
+}
+
+function renderJournalWeekHeader(group, isOpen) {
+  const { label, stats } = group;
+  const pnlColor = stats.netPnl >= 0 ? 'var(--green)' : 'var(--red)';
+  return `
+    <div class="journal-week-header" data-week="${group.weekStart}">
+      <span class="journal-week-chevron ${isOpen ? 'open' : ''}">▶</span>
+      <span class="journal-week-range">${label}</span>
+      <div class="journal-week-stats">
+        <span>${stats.count} trade${stats.count !== 1 ? 's' : ''}</span>
+        <span>${stats.winRate != null ? `<b>${stats.winRate}%</b> win rate` : '—'}</span>
+        <span style="color:${pnlColor};"><b>${stats.netPnl >= 0 ? '+' : ''}${stats.netPnl.toFixed(2)}%</b> net</span>
+      </div>
+    </div>
+  `;
+}
+
 function renderJournalEntryRow(entry) {
   const m = computeJournalMetrics(entry);
   const badgeClass = m.result === 'WIN' ? 'win' : m.result === 'LOSS' ? 'loss' : m.result === 'BE' ? 'be' : '';
   const pnlText = m.pnlPercent != null ? `${m.pnlPercent >= 0 ? '+' : ''}${m.pnlPercent.toFixed(2)}%` : '—';
   const pnlColor = m.pnlPercent == null ? 'var(--text4)' : m.pnlPercent >= 0 ? 'var(--green)' : 'var(--red)';
+  const dateShort = entry.entry_date.slice(5); // MM-DD, the week header already carries the year/range
 
   return `
     <div class="journal-entry-row" data-entry-id="${entry.id}">
-      <div class="journal-entry-summary">
-        <span style="font-size:12px;color:var(--text2);min-width:78px;">${entry.entry_date}</span>
-        <span style="font-size:11px;color:var(--text4);min-width:70px;">${m.dayOfWeek ? m.dayOfWeek.slice(0, 3) : '—'}</span>
-        <span style="font-size:12px;font-weight:500;color:var(--text2);min-width:70px;">${escapeHtml(entry.asset)}</span>
-        <span style="font-size:11px;color:var(--text3);min-width:44px;">${entry.trade_type}</span>
+      <div class="journal-row-grid">
+        <span style="font-size:12px;color:var(--text2);">${dateShort}</span>
+        <span style="font-size:11px;color:var(--text4);">${m.dayOfWeek ? m.dayOfWeek.slice(0, 3) : '—'}</span>
+        <span style="font-size:12px;font-weight:500;color:var(--text2);">${escapeHtml(entry.asset)}</span>
+        <span style="font-size:11px;color:var(--text3);">${entry.trade_type}</span>
         ${m.result ? `<span class="journal-result-badge ${badgeClass}">${m.result}</span>` : '<span class="card-meta">Open</span>'}
-        <span style="font-size:12px;font-weight:500;margin-left:auto;color:${pnlColor};">${pnlText}</span>
+        <span style="font-size:12px;font-weight:500;text-align:right;color:${pnlColor};">${pnlText}</span>
       </div>
       <div class="journal-entry-detail" id="journal-detail-${entry.id}">
         <div class="journal-grid-2">
@@ -2824,7 +2882,30 @@ function renderJournalEntryRow(entry) {
   `;
 }
 
+function renderJournalWeekGroup(group, isOpen) {
+  return `
+    <div class="journal-week-group">
+      ${renderJournalWeekHeader(group, isOpen)}
+      <div class="journal-week-entries ${isOpen ? 'open' : ''}" id="journal-week-entries-${group.weekStart}">
+        <div class="journal-row-grid journal-col-header">
+          <span>Date</span><span>Day</span><span>Asset</span><span>Type</span><span>Result</span><span style="text-align:right;">P&amp;L</span>
+        </div>
+        ${group.entries.map(renderJournalEntryRow).join('')}
+      </div>
+    </div>
+  `;
+}
+
 function attachJournalHistoryHandlers() {
+  document.querySelectorAll('.journal-week-header').forEach(header => {
+    header.addEventListener('click', () => {
+      const week = header.dataset.week;
+      const entriesEl = document.getElementById(`journal-week-entries-${week}`);
+      const chevron = header.querySelector('.journal-week-chevron');
+      if (entriesEl) entriesEl.classList.toggle('open');
+      if (chevron) chevron.classList.toggle('open');
+    });
+  });
   document.querySelectorAll('.journal-entry-row').forEach(row => {
     row.addEventListener('click', (e) => {
       if (e.target.classList.contains('journal-delete-btn')) return;
@@ -2844,6 +2925,22 @@ function attachJournalHistoryHandlers() {
   });
 }
 
+function computeJournalOverallStats(entries) {
+  let wins = 0, losses = 0, netPnl = 0;
+  const rValues = [];
+  entries.forEach(e => {
+    const m = computeJournalMetrics(e);
+    if (m.result === 'WIN') wins++;
+    else if (m.result === 'LOSS') losses++;
+    if (m.pnlPercent != null) netPnl += m.pnlPercent;
+    if (m.actualR != null) rValues.push(m.actualR);
+  });
+  const decided = wins + losses;
+  const winRate = decided ? Math.round((wins / decided) * 100) : null;
+  const avgR = rValues.length ? rValues.reduce((a, b) => a + b, 0) / rValues.length : null;
+  return { total: entries.length, winRate, avgR, netPnl };
+}
+
 // ---------- Section orchestrator ----------
 
 async function loadAndRenderJournalSection() {
@@ -2857,6 +2954,9 @@ async function loadAndRenderJournalSection() {
   const entries = entriesRaw || [];
   resetJournalFormSelections();
 
+  const weekGroups = groupJournalEntriesByWeek(entries);
+  const overall = computeJournalOverallStats(entries);
+
   el.innerHTML = `
     <div class="card">
       <div class="card-header">
@@ -2866,8 +2966,18 @@ async function loadAndRenderJournalSection() {
       <div id="journal-form-panel" style="display:none;margin-bottom:14px;">
         ${renderJournalEntryForm()}
       </div>
+      ${entries.length ? `
+        <div class="stat-grid-4" style="margin-bottom:14px;">
+          <div class="stat-box"><div class="stat-box-value">${overall.total}</div><div class="stat-box-label">Total trades</div></div>
+          <div class="stat-box"><div class="stat-box-value ${overall.winRate != null && overall.winRate >= 50 ? 'g' : 'a'}">${overall.winRate != null ? overall.winRate + '%' : '—'}</div><div class="stat-box-label">Win rate</div></div>
+          <div class="stat-box"><div class="stat-box-value ${overall.avgR != null && overall.avgR >= 0 ? 'g' : 'r'}">${overall.avgR != null ? (overall.avgR >= 0 ? '+' : '') + overall.avgR.toFixed(2) + 'R' : '—'}</div><div class="stat-box-label">Avg R-multiple</div></div>
+          <div class="stat-box"><div class="stat-box-value ${overall.netPnl >= 0 ? 'g' : 'r'}">${overall.netPnl >= 0 ? '+' : ''}${overall.netPnl.toFixed(1)}%</div><div class="stat-box-label">Total P&amp;L</div></div>
+        </div>
+      ` : ''}
       <div id="journal-history-list">
-        ${entries.length ? entries.map(renderJournalEntryRow).join('') : '<p class="empty-state">No journal entries yet — log your first trade above.</p>'}
+        ${weekGroups.length
+          ? weekGroups.map((g, i) => renderJournalWeekGroup(g, i === 0)).join('')
+          : '<p class="empty-state">No journal entries yet — log your first trade above.</p>'}
       </div>
     </div>
   `;
