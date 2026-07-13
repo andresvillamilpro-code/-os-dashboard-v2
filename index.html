@@ -142,10 +142,13 @@
     .tag-chip .tag-remove:hover { opacity: 1; color: var(--red); }
     .tag-add-row { display: flex; gap: 6px; margin-top: 6px; }
     .tag-add-row input { flex: 1; }
-    .journal-entry-row { padding: 10px 0; border-bottom: 0.5px solid var(--border2); cursor: pointer; }
-    .journal-entry-row:last-child { border-bottom: none; }
-    .journal-entry-summary { display: flex; align-items: center; gap: 10px; }
-    .journal-entry-detail { margin-top: 10px; padding-top: 10px; border-top: 0.5px dashed var(--border2); font-size: 12px; color: var(--text2); display: none; }
+    .journal-section-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--purple-light); margin: 18px 0 10px; padding-top: 14px; border-top: 0.5px solid var(--border2); }
+    .journal-section-label:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+    .tag-chip.tag-add-toggle { border-style: dashed; color: var(--text4); background: transparent; }
+    .tag-chip.tag-add-toggle:hover { color: var(--purple-light); border-color: var(--purple-border); }
+    .journal-entry-row { cursor: pointer; padding: 6px 12px; border-radius: 6px; }
+    .journal-entry-row:hover { background: var(--bg3); }
+    .journal-entry-detail { display: none; margin: 8px 12px 10px; padding-top: 10px; border-top: 0.5px dashed var(--border2); font-size: 12px; color: var(--text2); }
     .journal-entry-detail.open { display: block; }
     .journal-result-badge { font-size: 10px; font-weight: 500; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: .04em; }
     .journal-result-badge.win { background: var(--green-bg); color: var(--green); }
@@ -153,6 +156,27 @@
     .journal-result-badge.be { background: var(--bg3); color: var(--text4); }
     .journal-links a { color: var(--blue); text-decoration: none; font-size: 11px; word-break: break-all; }
     .journal-links a:hover { text-decoration: underline; }
+
+    /* Weekly compilation — collapsible group header with rolled-up stats */
+    .journal-week-group { margin-bottom: 4px; }
+    .journal-week-header { display: flex; align-items: center; gap: 14px; padding: 10px 12px; background: var(--bg3); border-radius: 8px; cursor: pointer; user-select: none; margin-top: 10px; }
+    .journal-week-header:hover { background: var(--purple-bg); }
+    .journal-week-range { font-size: 12px; font-weight: 500; color: var(--text2); }
+    .journal-week-stats { display: flex; gap: 14px; margin-left: auto; font-size: 11px; color: var(--text4); }
+    .journal-week-stats b { color: var(--text3); font-weight: 500; }
+    .journal-week-chevron { font-size: 10px; color: var(--text4); transition: transform .15s; }
+    .journal-week-chevron.open { transform: rotate(90deg); }
+    .journal-week-entries { display: none; }
+    .journal-week-entries.open { display: block; }
+
+    /* Grid-aligned entry rows, replacing loose flex so dates/badges/PnL line up like a table */
+    .journal-row-grid { display: grid; grid-template-columns: 78px 38px 1fr 44px 68px 76px; gap: 10px; align-items: center; }
+    .journal-col-header { font-size: 9px; font-weight: 500; text-transform: uppercase; letter-spacing: .06em; color: var(--text4); padding: 6px 12px 4px; }
+    @media (max-width: 700px) {
+      .journal-row-grid { grid-template-columns: 58px 1fr 50px 60px; }
+      .journal-row-grid > :nth-child(2), .journal-row-grid > :nth-child(4) { display: none; } /* hide day-of-week + type cols on mobile */
+      .journal-col-header { display: none; }
+    }
     @media (max-width: 700px) {
       .journal-grid-2, .journal-grid-3 { grid-template-columns: 1fr; }
     }
