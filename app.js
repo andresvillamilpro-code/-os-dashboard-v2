@@ -319,6 +319,10 @@ function switchTab(tabName) {
   document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.tab === tabName);
   });
+  // Calendar's time grid benefits from the full viewport width — every
+  // other tab keeps the default centered, readable max-width.
+  const mainEl = document.querySelector('.main');
+  if (mainEl) mainEl.classList.toggle('main-wide', tabName === 'calendar');
   const renderer = TAB_RENDERERS[tabName];
   if (renderer) renderer();
 }
