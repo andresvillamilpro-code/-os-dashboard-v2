@@ -2029,6 +2029,8 @@ async function renderTradingTab() {
     </div>
 
     <div id="discipline-section"><p class="loading-text">Loading discipline stats...</p></div>
+
+    <div id="journal-section"><p class="loading-text">Loading trading journal...</p></div>
   `;
 
   attachTradingSettingsHandler();
@@ -2038,6 +2040,9 @@ async function renderTradingTab() {
 
   // Load discipline section async (doesn't block the main render)
   loadAndRenderDisciplineSection();
+
+  // Load trading journal section async (doesn't block the main render)
+  loadAndRenderJournalSection();
 }
 
 function attachTradingSettingsToggle() {
@@ -2452,6 +2457,430 @@ function attachSessionFormHandlers() {
     }
     loadAndRenderDisciplineSection();
   });
+}
+
+// ============================================
+// TRADING JOURNAL (inside Trading tab)
+// ============================================
+
+const JOURNAL_TAG_CATEGORIES = ['emotion', 'setup', 'timeframe'];
+
+// Cache of active tags per category, loaded from `journal_tags`.
+// Shape: { emotion: [{id,tag_name}], setup: [...], timeframe: [...] }
+let journalTagsCache = { emotion: [], setup: [], timeframe: [] };
+
+// Transient selection state for the currently-open "new entry" form.
+// Keyed by field id (not category) since Emotion Before / Emotion After
+// both draw from the same 'emotion' tag pool but need independent selections.
+let journalFormSelections = {
+  'jf-timeframe': [],
+  'jf-emotion-before': [],
+  'jf-setup': [],
+  'jf-emotion-after': []
+};
+const JOURNAL_FIELD_TO_CATEGORY = {
+  'jf-timeframe': 'timeframe',
+  'jf-emotion-before': 'emotion',
+  'jf-setup': 'setup',
+  'jf-emotion-after': 'emotion'
+};
+
+async function loadJournalTags() {
+  const { data } = await sb.from('journal_tags')
+    .select('id, category, tag_name')
+    .eq('active', true)
+    .order('sort_order', { ascending: true });
+  const grouped = { emotion: [], setup: [], timeframe: [] };
+  (data || []).forEach(row => {
+    if (grouped[row.category]) grouped[row.category].push(row);
+  });
+  journalTagsCache = grouped;
+}
+
+async function addJournalTag(category, rawName) {
+  const name = (rawName || '').trim();
+  if (!name) return { ok: false, error: 'Enter a tag name.' };
+  const exists = (journalTagsCache[category] || []).some(t => t.tag_name.toLowerCase() === name.toLowerCase());
+  if (exists) return { ok: false, error: 'That tag already exists.' };
+  const { error } = await sb.from('journal_tags').insert({
+    category, tag_name: name, sort_order: (journalTagsCache[category] || []).length
+  });
+  if (error) return { ok: false, error: error.message };
+  await loadJournalTags();
+  return { ok: true };
+}
+
+async function deleteJournalTag(category, tagId) {
+  // Soft-delete: keeps historical entries' text intact, just removes from picker.
+  const { error } = await sb.from('journal_tags').update({ active: false }).eq('id', tagId);
+  if (error) return { ok: false, error: error.message };
+  await loadJournalTags();
+  return { ok: true };
+}
+
+// ---------- Auto-calculated metrics ----------
+// Mirrors the KB principle "deterministic JS handles every measurable field" —
+// day-of-week, planned/actual R-multiple, P&L%, and Win/Loss/BE are all derived,
+// never typed by hand.
+function computeJournalMetrics(e) {
+  const entryPrice = Number(e.entry_price);
+  const stopLoss = Number(e.stop_loss);
+  const takeProfit = e.take_profit != null && e.take_profit !== '' ? Number(e.take_profit) : null;
+  const closePrice = e.close_price != null && e.close_price !== '' ? Number(e.close_price) : null;
+  const riskPct = e.risk_percent != null && e.risk_percent !== '' ? Number(e.risk_percent) : null;
+  const isBuy = e.trade_type === 'BUY';
+
+  const riskDistance = isBuy ? (entryPrice - stopLoss) : (stopLoss - entryPrice);
+
+  let plannedR = null;
+  if (takeProfit != null && riskDistance > 0) {
+    const rewardDistance = isBuy ? (takeProfit - entryPrice) : (entryPrice - takeProfit);
+    plannedR = rewardDistance / riskDistance;
+  }
+
+  let actualR = null;
+  if (closePrice != null && riskDistance > 0) {
+    const gainDistance = isBuy ? (closePrice - entryPrice) : (entryPrice - closePrice);
+    actualR = gainDistance / riskDistance;
+  }
+
+  let pnlPercent = null;
+  if (actualR != null && riskPct != null) pnlPercent = actualR * riskPct;
+
+  let result = null;
+  if (actualR != null) {
+    result = Math.abs(actualR) < 0.05 ? 'BE' : (actualR > 0 ? 'WIN' : 'LOSS');
+  }
+
+  let dayOfWeek = null;
+  if (e.entry_date) {
+    dayOfWeek = new Date(e.entry_date + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'long' });
+  }
+
+  let duration = null;
+  if (e.entry_time && e.close_time) {
+    const [eh, em] = e.entry_time.split(':').map(Number);
+    const [ch, cm] = e.close_time.split(':').map(Number);
+    let mins = (ch * 60 + cm) - (eh * 60 + em);
+    if (mins < 0) mins += 24 * 60; // assume overnight roll if close < entry
+    const h = Math.floor(mins / 60), m = mins % 60;
+    duration = h > 0 ? `${h}h ${m}m` : `${m}m`;
+  }
+
+  return { dayOfWeek, plannedR, actualR, pnlPercent, result, duration };
+}
+
+// ---------- Tag picker widget ----------
+
+function renderTagPicker(fieldId, label) {
+  const category = JOURNAL_FIELD_TO_CATEGORY[fieldId];
+  const options = journalTagsCache[category] || [];
+  const selected = journalFormSelections[fieldId] || [];
+  return `
+    <div class="journal-field">
+      <label>${escapeHtml(label)}</label>
+      <div class="tag-picker" id="${fieldId}-picker" data-field="${fieldId}">
+        ${options.map(t => `
+          <span class="tag-chip ${selected.includes(t.tag_name) ? 'selected' : ''}" data-tag-name="${escapeHtml(t.tag_name)}">
+            ${escapeHtml(t.tag_name)}
+            <span class="tag-remove" data-tag-id="${t.id}" title="Remove from list">×</span>
+          </span>
+        `).join('') || '<span class="card-meta">No tags yet — add one below.</span>'}
+      </div>
+      <div class="tag-add-row">
+        <input type="text" id="${fieldId}-new-tag-input" placeholder="Add ${escapeHtml(label.toLowerCase())}..." />
+        <button type="button" class="btn-secondary" id="${fieldId}-add-tag-btn">+ Add</button>
+      </div>
+    </div>
+  `;
+}
+
+function attachTagPickerHandlers(fieldId) {
+  const picker = document.getElementById(`${fieldId}-picker`);
+  const category = JOURNAL_FIELD_TO_CATEGORY[fieldId];
+
+  if (picker) {
+    picker.querySelectorAll('.tag-chip').forEach(chip => {
+      chip.addEventListener('click', (e) => {
+        if (e.target.classList.contains('tag-remove')) return; // handled separately
+        const name = chip.dataset.tagName;
+        const sel = journalFormSelections[fieldId];
+        const idx = sel.indexOf(name);
+        if (idx >= 0) sel.splice(idx, 1); else sel.push(name);
+        chip.classList.toggle('selected');
+      });
+    });
+    picker.querySelectorAll('.tag-remove').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const tagId = btn.dataset.tagId;
+        if (!confirm('Remove this tag from your picker? Past entries keep their text either way.')) return;
+        const result = await deleteJournalTag(category, tagId);
+        if (!result.ok) { alert(result.error); return; }
+        rerenderJournalForm();
+      });
+    });
+  }
+
+  const addBtn = document.getElementById(`${fieldId}-add-tag-btn`);
+  const input = document.getElementById(`${fieldId}-new-tag-input`);
+  if (addBtn && input) {
+    const submit = async () => {
+      const result = await addJournalTag(category, input.value);
+      if (!result.ok) { alert(result.error); return; }
+      journalFormSelections[fieldId].push(input.value.trim());
+      rerenderJournalForm();
+    };
+    addBtn.addEventListener('click', submit);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+  }
+}
+
+function rerenderJournalForm() {
+  const panel = document.getElementById('journal-form-panel');
+  if (!panel) return;
+  panel.innerHTML = renderJournalEntryForm();
+  attachJournalFormHandlers();
+}
+
+// ---------- Entry form ----------
+
+function renderJournalEntryForm() {
+  return `
+    <form id="journal-entry-form">
+      <div class="journal-grid-3">
+        <div class="journal-field"><label>Date</label><input type="date" name="entry_date" value="${todayISO()}" required /></div>
+        <div class="journal-field"><label>Asset</label><input type="text" name="asset" placeholder="BTC, NAS100, GOLD..." required /></div>
+        <div class="journal-field"><label>Type</label>
+          <select name="trade_type" required>
+            <option value="BUY">BUY</option>
+            <option value="SELL">SELL</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="journal-grid-3" style="margin-top:10px;">
+        <div class="journal-field"><label>Entry time (optional)</label><input type="time" name="entry_time" /></div>
+        <div class="journal-field"><label>Close time (optional)</label><input type="time" name="close_time" /></div>
+        <div class="journal-field"><label>Risk %</label><input type="number" step="0.01" name="risk_percent" placeholder="3" required /></div>
+      </div>
+
+      <div style="margin-top:10px;">${renderTagPicker('jf-timeframe', 'Timeframe')}</div>
+
+      <div class="journal-field" style="margin-top:10px;">
+        <label>TradingView links — before (one per line)</label>
+        <textarea name="chart_links_before" placeholder="https://www.tradingview.com/x/..."></textarea>
+      </div>
+
+      <div style="margin-top:10px;">${renderTagPicker('jf-emotion-before', 'Emotion before')}</div>
+      <div style="margin-top:10px;">${renderTagPicker('jf-setup', 'Trade confirmation / setup')}</div>
+
+      <div class="journal-grid-3" style="margin-top:10px;">
+        <div class="journal-field"><label>Entry price</label><input type="number" step="any" name="entry_price" required /></div>
+        <div class="journal-field"><label>Stop loss</label><input type="number" step="any" name="stop_loss" required /></div>
+        <div class="journal-field"><label>Take profit (optional)</label><input type="number" step="any" name="take_profit" /></div>
+      </div>
+
+      <div class="journal-field" style="margin-top:10px;">
+        <label>Close price (leave blank if still open)</label>
+        <input type="number" step="any" name="close_price" />
+      </div>
+
+      <div style="margin-top:10px;">${renderTagPicker('jf-emotion-after', 'Emotion after')}</div>
+
+      <div class="journal-field" style="margin-top:10px;">
+        <label>Conclusion / lesson</label>
+        <textarea name="conclusion_lesson" placeholder="What happened, what you'd do differently..."></textarea>
+      </div>
+
+      <div class="journal-field" style="margin-top:10px;">
+        <label>TradingView links — after (one per line)</label>
+        <textarea name="chart_links_after" placeholder="https://www.tradingview.com/x/..."></textarea>
+      </div>
+
+      <div id="journal-form-error" style="font-size:11px;color:var(--red);margin-top:8px;"></div>
+
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        <button type="submit" class="btn-secondary">Save entry</button>
+        <button type="button" class="btn-secondary" id="journal-form-cancel" style="background:var(--bg3);color:var(--text3);">Cancel</button>
+      </div>
+    </form>
+  `;
+}
+
+function resetJournalFormSelections() {
+  journalFormSelections = { 'jf-timeframe': [], 'jf-emotion-before': [], 'jf-setup': [], 'jf-emotion-after': [] };
+}
+
+function attachJournalFormHandlers() {
+  ['jf-timeframe', 'jf-emotion-before', 'jf-setup', 'jf-emotion-after'].forEach(attachTagPickerHandlers);
+
+  const form = document.getElementById('journal-entry-form');
+  const errorEl = document.getElementById('journal-form-error');
+  const cancelBtn = document.getElementById('journal-form-cancel');
+
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', () => {
+      resetJournalFormSelections();
+      const panel = document.getElementById('journal-form-panel');
+      if (panel) panel.style.display = 'none';
+    });
+  }
+
+  if (form) {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (errorEl) errorEl.textContent = '';
+      const fd = new FormData(form);
+      const { data: { user } } = await sb.auth.getUser();
+
+      const entry = {
+        user_id: user?.id,
+        entry_date: fd.get('entry_date'),
+        asset: (fd.get('asset') || '').trim().toUpperCase(),
+        trade_type: fd.get('trade_type'),
+        entry_time: fd.get('entry_time') || null,
+        close_time: fd.get('close_time') || null,
+        risk_percent: parseFloat(fd.get('risk_percent')) || null,
+        timeframe: journalFormSelections['jf-timeframe'],
+        chart_links_before: (fd.get('chart_links_before') || '').trim() || null,
+        emotion_before: journalFormSelections['jf-emotion-before'],
+        setup_confirmations: journalFormSelections['jf-setup'],
+        entry_price: parseFloat(fd.get('entry_price')),
+        stop_loss: parseFloat(fd.get('stop_loss')),
+        take_profit: fd.get('take_profit') ? parseFloat(fd.get('take_profit')) : null,
+        close_price: fd.get('close_price') ? parseFloat(fd.get('close_price')) : null,
+        emotion_after: journalFormSelections['jf-emotion-after'],
+        conclusion_lesson: (fd.get('conclusion_lesson') || '').trim() || null,
+        chart_links_after: (fd.get('chart_links_after') || '').trim() || null
+      };
+
+      if (!entry.asset || !entry.entry_date || Number.isNaN(entry.entry_price) || Number.isNaN(entry.stop_loss) || !entry.risk_percent) {
+        if (errorEl) errorEl.textContent = 'Date, asset, entry price, stop loss, and risk % are required.';
+        return;
+      }
+
+      const { error } = await sb.from('trading_journal').insert(entry);
+      if (error) {
+        if (errorEl) errorEl.textContent = 'Save failed: ' + error.message;
+        return;
+      }
+
+      resetJournalFormSelections();
+      const panel = document.getElementById('journal-form-panel');
+      if (panel) panel.style.display = 'none';
+      loadAndRenderJournalSection();
+    });
+  }
+}
+
+// ---------- History list ----------
+
+function formatJournalLinks(text) {
+  if (!text) return '<span class="card-meta">—</span>';
+  return text.split('\n').map(l => l.trim()).filter(Boolean)
+    .map(l => `<a href="${escapeHtml(l)}" target="_blank" rel="noopener">${escapeHtml(l)}</a>`)
+    .join('<br/>');
+}
+
+function renderJournalEntryRow(entry) {
+  const m = computeJournalMetrics(entry);
+  const badgeClass = m.result === 'WIN' ? 'win' : m.result === 'LOSS' ? 'loss' : m.result === 'BE' ? 'be' : '';
+  const pnlText = m.pnlPercent != null ? `${m.pnlPercent >= 0 ? '+' : ''}${m.pnlPercent.toFixed(2)}%` : '—';
+  const pnlColor = m.pnlPercent == null ? 'var(--text4)' : m.pnlPercent >= 0 ? 'var(--green)' : 'var(--red)';
+
+  return `
+    <div class="journal-entry-row" data-entry-id="${entry.id}">
+      <div class="journal-entry-summary">
+        <span style="font-size:12px;color:var(--text2);min-width:78px;">${entry.entry_date}</span>
+        <span style="font-size:11px;color:var(--text4);min-width:70px;">${m.dayOfWeek ? m.dayOfWeek.slice(0, 3) : '—'}</span>
+        <span style="font-size:12px;font-weight:500;color:var(--text2);min-width:70px;">${escapeHtml(entry.asset)}</span>
+        <span style="font-size:11px;color:var(--text3);min-width:44px;">${entry.trade_type}</span>
+        ${m.result ? `<span class="journal-result-badge ${badgeClass}">${m.result}</span>` : '<span class="card-meta">Open</span>'}
+        <span style="font-size:12px;font-weight:500;margin-left:auto;color:${pnlColor};">${pnlText}</span>
+      </div>
+      <div class="journal-entry-detail" id="journal-detail-${entry.id}">
+        <div class="journal-grid-2">
+          <div><b>Timeframe:</b> ${(entry.timeframe || []).join(', ') || '—'}</div>
+          <div><b>Planned R:R:</b> ${m.plannedR != null ? '1:' + m.plannedR.toFixed(2) : '—'}</div>
+          <div><b>Actual R:</b> ${m.actualR != null ? m.actualR.toFixed(2) + 'R' : '—'}</div>
+          <div><b>Duration:</b> ${m.duration || '—'}</div>
+          <div><b>Entry:</b> ${entry.entry_price}</div>
+          <div><b>Stop loss:</b> ${entry.stop_loss}</div>
+          <div><b>Take profit:</b> ${entry.take_profit ?? '—'}</div>
+          <div><b>Close:</b> ${entry.close_price ?? '—'}</div>
+          <div><b>Emotion before:</b> ${(entry.emotion_before || []).join(', ') || '—'}</div>
+          <div><b>Emotion after:</b> ${(entry.emotion_after || []).join(', ') || '—'}</div>
+        </div>
+        <div style="margin-top:8px;"><b>Setup confirmations:</b> ${(entry.setup_confirmations || []).join(', ') || '—'}</div>
+        <div style="margin-top:8px;"><b>Conclusion / lesson:</b><br/>${entry.conclusion_lesson ? escapeHtml(entry.conclusion_lesson) : '—'}</div>
+        <div class="journal-links" style="margin-top:8px;"><b>Charts before:</b><br/>${formatJournalLinks(entry.chart_links_before)}</div>
+        <div class="journal-links" style="margin-top:8px;"><b>Charts after:</b><br/>${formatJournalLinks(entry.chart_links_after)}</div>
+        <div style="margin-top:10px;">
+          <span class="consistency-delete-btn journal-delete-btn" data-entry-id="${entry.id}" style="cursor:pointer;color:var(--red);font-size:11px;">Delete entry</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function attachJournalHistoryHandlers() {
+  document.querySelectorAll('.journal-entry-row').forEach(row => {
+    row.addEventListener('click', (e) => {
+      if (e.target.classList.contains('journal-delete-btn')) return;
+      const id = row.dataset.entryId;
+      const detail = document.getElementById(`journal-detail-${id}`);
+      if (detail) detail.classList.toggle('open');
+    });
+  });
+  document.querySelectorAll('.journal-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm('Delete this journal entry? This cannot be undone.')) return;
+      const { error } = await sb.from('trading_journal').delete().eq('id', btn.dataset.entryId);
+      if (error) { alert('Delete failed: ' + error.message); return; }
+      loadAndRenderJournalSection();
+    });
+  });
+}
+
+// ---------- Section orchestrator ----------
+
+async function loadAndRenderJournalSection() {
+  const el = document.getElementById('journal-section');
+  if (!el) return;
+
+  const [, { data: entriesRaw }] = await Promise.all([
+    loadJournalTags(),
+    sb.from('trading_journal').select('*').order('entry_date', { ascending: false })
+  ]);
+  const entries = entriesRaw || [];
+  resetJournalFormSelections();
+
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <p class="card-title" style="margin-bottom:0;">Trading journal</p>
+        <button type="button" class="btn-secondary" id="journal-new-toggle">+ New entry</button>
+      </div>
+      <div id="journal-form-panel" style="display:none;margin-bottom:14px;">
+        ${renderJournalEntryForm()}
+      </div>
+      <div id="journal-history-list">
+        ${entries.length ? entries.map(renderJournalEntryRow).join('') : '<p class="empty-state">No journal entries yet — log your first trade above.</p>'}
+      </div>
+    </div>
+  `;
+
+  const toggleBtn = document.getElementById('journal-new-toggle');
+  const panel = document.getElementById('journal-form-panel');
+  if (toggleBtn && panel) {
+    toggleBtn.addEventListener('click', () => {
+      panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+    });
+  }
+  attachJournalFormHandlers();
+  attachJournalHistoryHandlers();
 }
 
 // ============================================
