@@ -124,7 +124,38 @@
 
     /* ── FORMS ── */
     .btn-secondary { background: var(--purple); color: #EEEDFE; border: none; border-radius: 7px; padding: 7px 14px; font-size: 11px; font-weight: 500; cursor: pointer; }
-    input[type="text"], input[type="email"], input[type="password"] { background: var(--bg3); border: 0.5px solid var(--border); border-radius: 7px; padding: 7px 10px; font-size: 12px; color: var(--text2); outline: none; font-family: var(--font); }
+    input[type="text"], input[type="email"], input[type="password"], input[type="number"], input[type="date"], input[type="time"], textarea, select { background: var(--bg3); border: 0.5px solid var(--border); border-radius: 7px; padding: 7px 10px; font-size: 12px; color: var(--text2); outline: none; font-family: var(--font); }
+    textarea { resize: vertical; min-height: 56px; width: 100%; }
+    select { cursor: pointer; }
+
+    /* ── TRADING JOURNAL ── */
+    .journal-field { display: flex; flex-direction: column; gap: 4px; }
+    .journal-field label { font-size: 10px; color: var(--text4); text-transform: uppercase; letter-spacing: .05em; }
+    .journal-field input, .journal-field select, .journal-field textarea { width: 100%; }
+    .journal-grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .journal-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .tag-picker { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+    .tag-chip { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; border-radius: 20px; border: 0.5px solid var(--border2); background: var(--bg3); color: var(--text3); font-size: 11px; cursor: pointer; user-select: none; transition: all .12s; }
+    .tag-chip:hover { border-color: var(--border); color: var(--text2); }
+    .tag-chip.selected { background: var(--purple-bg); border-color: var(--purple-border); color: var(--purple-light); font-weight: 500; }
+    .tag-chip .tag-remove { opacity: .6; font-size: 12px; margin-left: 2px; }
+    .tag-chip .tag-remove:hover { opacity: 1; color: var(--red); }
+    .tag-add-row { display: flex; gap: 6px; margin-top: 6px; }
+    .tag-add-row input { flex: 1; }
+    .journal-entry-row { padding: 10px 0; border-bottom: 0.5px solid var(--border2); cursor: pointer; }
+    .journal-entry-row:last-child { border-bottom: none; }
+    .journal-entry-summary { display: flex; align-items: center; gap: 10px; }
+    .journal-entry-detail { margin-top: 10px; padding-top: 10px; border-top: 0.5px dashed var(--border2); font-size: 12px; color: var(--text2); display: none; }
+    .journal-entry-detail.open { display: block; }
+    .journal-result-badge { font-size: 10px; font-weight: 500; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: .04em; }
+    .journal-result-badge.win { background: var(--green-bg); color: var(--green); }
+    .journal-result-badge.loss { background: var(--red-bg); color: var(--red); }
+    .journal-result-badge.be { background: var(--bg3); color: var(--text4); }
+    .journal-links a { color: var(--blue); text-decoration: none; font-size: 11px; word-break: break-all; }
+    .journal-links a:hover { text-decoration: underline; }
+    @media (max-width: 700px) {
+      .journal-grid-2, .journal-grid-3 { grid-template-columns: 1fr; }
+    }
 
     /* ── LOGIN SCREEN ── */
     /* ── MATRIX LOGIN SCREEN ── */
