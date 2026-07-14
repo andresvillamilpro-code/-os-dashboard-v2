@@ -369,14 +369,14 @@ async function renderDailyTab() {
   ]);
 
   container.innerHTML = `
-    <div class="identity-banner">${MISSION_STATEMENT}</div>
-    ${renderChecklistCard('Morning routine', 'morning-routine', routine)}
-    ${renderCalendarCard()}
+    ${renderHeroCard(snapshot)}
+    ${renderTopGoalsCard(goals)}
     <div class="two-col">
-      ${renderTopGoalsCard(goals)}
-      ${renderTaskListCard(tasks)}
+      ${renderChecklistCard('Morning routine', 'morning-routine', routine)}
+      ${renderEditableChecklistCard('Consistency check', 'consistency', consistency, consistencyItems)}
     </div>
-    ${renderEditableChecklistCard('Consistency check', 'consistency', consistency, consistencyItems)}
+    ${renderTaskListCard(tasks)}
+    ${renderCalendarCard()}
     ${renderTradingSnapshotBox(snapshot)}
   `;
 
@@ -386,6 +386,29 @@ async function renderDailyTab() {
   attachTopGoalsHandlers();
   attachTaskListHandlers(tasks);
   initGoogleCalendar();
+}
+
+function renderHeroCard(s) {
+  if (!s) {
+    return `<div class="hero-card"><div class="hero-mission" style="margin-top:0;padding-top:0;border-top:none;">${MISSION_STATEMENT}</div></div>`;
+  }
+  const progressPct = Math.max(0, Math.min(100, (s.pnlPct / s.profitTargetPct) * 100));
+  const pnlColor = s.pnlPct >= 0 ? 'var(--green)' : 'var(--red)';
+  return `
+    <div class="hero-card">
+      <div class="hero-top">
+        <div>
+          <div class="hero-label">Account balance</div>
+          <div class="hero-value" style="color:${pnlColor};">$${Math.round(s.currentBalance).toLocaleString()}</div>
+          <div class="hero-sub">${s.pnlPct >= 0 ? '+' : ''}${s.pnlPct.toFixed(1)}% overall &middot; target ${s.profitTargetPct}%</div>
+        </div>
+        <span class="hero-status-pill" style="border:0.5px solid ${s.weekStatusColor};color:${s.weekStatusColor};">${s.weekStatus}</span>
+      </div>
+      <div class="hero-progress-track"><div class="hero-progress-fill" style="width:${progressPct}%;background:${pnlColor};"></div></div>
+      <div class="hero-progress-caption"><span>Progress to profit target</span><span>${progressPct.toFixed(0)}%</span></div>
+      <div class="hero-mission">${MISSION_STATEMENT}</div>
+    </div>
+  `;
 }
 
 // ---------- Trading snapshot box (Daily tab) ----------
