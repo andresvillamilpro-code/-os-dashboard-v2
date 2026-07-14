@@ -479,7 +479,7 @@
       entries.forEach(entry => {
         topbarEl.classList.toggle('scrolled', !entry.isIntersecting);
       });
-    }, { rootMargin: '-60px 0px 0px 0px', threshold: 0 });
+    }, { rootMargin: '60px 0px 0px 0px', threshold: 0 });
     topbarScrollObserver.observe(scrollSentinel);
   }
 
