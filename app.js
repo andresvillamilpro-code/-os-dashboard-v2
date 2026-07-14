@@ -369,7 +369,7 @@ async function renderDailyTab() {
   ]);
 
   container.innerHTML = `
-    ${renderHeroCard(snapshot)}
+    ${renderHeroCard(snapshot, { showMission: true })}
     ${renderTopGoalsCard(goals)}
     <div class="two-col">
       ${renderChecklistCard('Morning routine', 'morning-routine', routine)}
@@ -388,9 +388,9 @@ async function renderDailyTab() {
   initGoogleCalendar();
 }
 
-function renderHeroCard(s) {
+function renderHeroCard(s, opts = {}) {
   if (!s) {
-    return `<div class="hero-card"><div class="hero-mission" style="margin-top:0;padding-top:0;border-top:none;">${MISSION_STATEMENT}</div></div>`;
+    return opts.showMission ? `<div class="hero-card"><div class="hero-mission" style="margin-top:0;padding-top:0;border-top:none;">${MISSION_STATEMENT}</div></div>` : '';
   }
   const progressPct = Math.max(0, Math.min(100, (s.pnlPct / s.profitTargetPct) * 100));
   const pnlColor = s.pnlPct >= 0 ? 'var(--green)' : 'var(--red)';
@@ -398,7 +398,7 @@ function renderHeroCard(s) {
     <div class="hero-card">
       <div class="hero-top">
         <div>
-          <div class="hero-label">Account balance</div>
+          <div class="hero-label">${opts.label || 'Account balance'}</div>
           <div class="hero-value" style="color:${pnlColor};">$${Math.round(s.currentBalance).toLocaleString()}</div>
           <div class="hero-sub">${s.pnlPct >= 0 ? '+' : ''}${s.pnlPct.toFixed(1)}% overall &middot; target ${s.profitTargetPct}%</div>
         </div>
@@ -406,7 +406,7 @@ function renderHeroCard(s) {
       </div>
       <div class="hero-progress-track"><div class="hero-progress-fill" style="width:${progressPct}%;background:${pnlColor};"></div></div>
       <div class="hero-progress-caption"><span>Progress to profit target</span><span>${progressPct.toFixed(0)}%</span></div>
-      <div class="hero-mission">${MISSION_STATEMENT}</div>
+      ${opts.showMission ? `<div class="hero-mission">${MISSION_STATEMENT}</div>` : ''}
     </div>
   `;
 }
@@ -1940,6 +1940,12 @@ async function renderTradingTab() {
   const fridayStr = fridayEnd.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 
   container.innerHTML = `
+    ${renderHeroCard({
+      currentBalance, pnlPct,
+      profitTargetPct: Number(settings.profit_target_pct),
+      weekStatus, weekStatusColor
+    })}
+
     <div class="card" style="border-left: 2px solid ${weekStatusColor};">
       <div class="card-header">
         <p class="card-title" style="margin-bottom:0;">This week — ${mondayStr} to ${fridayStr}</p>
@@ -1974,11 +1980,10 @@ async function renderTradingTab() {
       </div>
     </div>
 
-    <div class="stat-grid-4">
-      <div class="card stat-box"><div class="stat-box-value">$${currentBalance.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div><div class="stat-box-label">Account balance</div></div>
-      <div class="card stat-box"><div class="stat-box-value ${pnlPct >= 0 ? 'g' : 'r'}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%</div><div class="stat-box-label">Total P&amp;L</div></div>
-      <div class="card stat-box"><div class="stat-box-value ${winRate >= 50 ? 'g' : 'a'}">${winRate}%</div><div class="stat-box-label">Win rate</div></div>
+    <div class="stat-grid-3">
+      <div class="card stat-box"><div class="stat-box-value ${winRate >= 50 ? 'g' : 'a'}">${winRate}%</div><div class="stat-box-label">Win rate (all-time)</div></div>
       <div class="card stat-box"><div class="stat-box-value">${trades.length}</div><div class="stat-box-label">Total trades</div></div>
+      <div class="card stat-box"><div class="stat-box-value g">${winStreak}</div><div class="stat-box-label">Best win streak</div></div>
     </div>
 
     <div class="card">
@@ -2044,13 +2049,6 @@ async function renderTradingTab() {
       </div>
     </div>
 
-    <div class="card">
-      <p class="card-title">Goal progress</p>
-      <div class="check-row" style="border:none;"><span class="check-label">$${currentBalance.toLocaleString(undefined, { maximumFractionDigits: 0 })} of $${targetBalance.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span><span class="check-label" style="margin-left:auto;">${goalProgressPct.toFixed(0)}%</span></div>
-      <div class="progress-track"><div class="progress-fill" style="width:${goalProgressPct}%;"></div></div>
-      <p class="empty-state" style="padding-top:10px; text-align:left;">${amountToGo > 0 ? `$${amountToGo.toLocaleString(undefined, { maximumFractionDigits: 0 })} to go` : 'Target reached!'}</p>
-    </div>
-
     <div id="discipline-section"><p class="loading-text">Loading discipline stats...</p></div>
 
     <div id="journal-section"><p class="loading-text">Loading trading journal...</p></div>
@@ -2109,13 +2107,33 @@ function attachCsvUploadHandler() {
   });
 }
 
+function hexToRgba(hex, alpha) {
+  const h = hex.replace('#', '');
+  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+  const n = parseInt(full, 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+}
+
+// Reads the live CSS custom properties so charts always match whichever
+// theme (dark or light) is currently active, instead of hardcoding one
+// theme's colors regardless of what's on screen.
+function getThemeChartColors() {
+  const cs = getComputedStyle(document.body);
+  const v = (name, fallback) => (cs.getPropertyValue(name).trim() || fallback);
+  const accent = v('--purple-light', '#00D4FF');
+  return {
+    textColor: v('--text3', '#9CA3AF'),
+    gridColor: v('--border2', '#1F2937'),
+    accent,
+    accentSoftRgba: hexToRgba(accent, 0.14),
+    palette: [accent, v('--blue', '#378ADD'), v('--green', '#1D9E75'), v('--amber', '#EF9F27'), v('--red', '#E24B4A'), v('--purple', '#00D4FF'), v('--text3', '#9CA3AF')]
+  };
+}
+
 function drawTradingCharts({ balancePoints, byInstrument, byDow, dowNames, byHour }) {
   if (typeof Chart === 'undefined') return;
 
-  const textColor = '#888888';
-  const gridColor = '#1e1e1e';
-  const purple = '#7F77DD';
-  const palette = ['#534AB7', '#378ADD', '#1D9E75', '#EF9F27', '#E24B4A', '#7F77DD', '#888888'];
+  const { textColor, gridColor, accent, accentSoftRgba, palette } = getThemeChartColors();
 
   Object.values(TRADING_CHARTS).forEach(c => c?.destroy());
 
@@ -2123,7 +2141,7 @@ function drawTradingCharts({ balancePoints, byInstrument, byDow, dowNames, byHou
   if (balanceEl) {
     TRADING_CHARTS.balance = new Chart(balanceEl, {
       type: 'line',
-      data: { labels: balancePoints.map(p => p.x), datasets: [{ data: balancePoints.map(p => p.y), borderColor: purple, backgroundColor: 'rgba(127,119,221,0.1)', fill: true, tension: 0.3, pointRadius: 0, pointHoverRadius: 5, pointHoverBackgroundColor: purple }] },
+      data: { labels: balancePoints.map(p => p.x), datasets: [{ data: balancePoints.map(p => p.y), borderColor: accent, backgroundColor: accentSoftRgba, fill: true, tension: 0.3, pointRadius: 0, pointHoverRadius: 5, pointHoverBackgroundColor: accent }] },
       options: {
         interaction: { mode: 'index', intersect: false },
         plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => '$' + ctx.parsed.y.toLocaleString(undefined, { maximumFractionDigits: 2 }) } } },
@@ -2147,7 +2165,7 @@ function drawTradingCharts({ balancePoints, byInstrument, byDow, dowNames, byHou
   if (dowEl) {
     TRADING_CHARTS.dow = new Chart(dowEl, {
       type: 'bar',
-      data: { labels: dowNames, datasets: [{ data: byDow, backgroundColor: purple, borderRadius: 4 }] },
+      data: { labels: dowNames, datasets: [{ data: byDow, backgroundColor: accent, borderRadius: 4 }] },
       options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: textColor, font: { size: 10 } }, grid: { display: false } }, y: { ticks: { color: textColor, font: { size: 10 } }, grid: { color: gridColor } } }, responsive: true, maintainAspectRatio: false }
     });
   }
@@ -2156,7 +2174,7 @@ function drawTradingCharts({ balancePoints, byInstrument, byDow, dowNames, byHou
   if (hourEl) {
     TRADING_CHARTS.hour = new Chart(hourEl, {
       type: 'bar',
-      data: { labels: Array.from({ length: 24 }, (_, i) => i + 'h'), datasets: [{ data: byHour, backgroundColor: '#378ADD', borderRadius: 3 }] },
+      data: { labels: Array.from({ length: 24 }, (_, i) => i + 'h'), datasets: [{ data: byHour, backgroundColor: palette[1], borderRadius: 3 }] },
       options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: textColor, font: { size: 8 }, maxTicksLimit: 12 }, grid: { display: false } }, y: { ticks: { color: textColor, font: { size: 10 } }, grid: { color: gridColor } } }, responsive: true, maintainAspectRatio: false }
     });
   }
@@ -3167,6 +3185,20 @@ async function renderFitnessTab() {
   // ── Render ──
   container.innerHTML = `
 
+    <!-- Hero: weight progress toward goal -->
+    <div class="hero-card">
+      <div class="hero-top">
+        <div>
+          <div class="hero-label">Current weight</div>
+          <div class="hero-value">${currentWeight != null ? currentWeight + ' lb' : '—'}</div>
+          <div class="hero-sub">${weightToGo != null ? `${weightToGo.toFixed(1)} lb to goal &middot; ${WEIGHT_GOAL_LBS} lb target` : `Goal: ${WEIGHT_GOAL_LBS} lb`}</div>
+        </div>
+        <span class="hero-status-pill" style="border:0.5px solid ${weekStatusColor};color:${weekStatusColor};">${weekStatus}</span>
+      </div>
+      <div class="hero-progress-track"><div class="hero-progress-fill" style="width:${weightGoalPct}%;background:var(--purple-light);"></div></div>
+      <div class="hero-progress-caption"><span>Progress to weight goal</span><span>${weightGoalPct.toFixed(0)}%</span></div>
+    </div>
+
     <!-- This week live summary -->
     <div class="card" style="border-left: 2px solid ${weekStatusColor};">
       <div class="card-header">
@@ -3176,8 +3208,7 @@ async function renderFitnessTab() {
       <div style="font-size:11px; color:var(--text4); margin-bottom:10px;">
         Live — updates as you check boxes below. Final snapshot locks in Sunday night.
       </div>
-      <div class="stat-grid-4">
-        <div class="stat-box"><div class="stat-box-value ${currentWeight ? 'w' : 'dim'}">${currentWeight != null ? currentWeight + ' lb' : '—'}</div><div class="stat-box-label">Weight</div></div>
+      <div class="stat-grid-3">
         <div class="stat-box"><div class="stat-box-value" style="color:${weekStatusColor};">${thisTrainingDays.size} / 5</div><div class="stat-box-label">Days trained</div></div>
         <div class="stat-box"><div class="stat-box-value">${thisCardioDays.size}</div><div class="stat-box-label">Cardio sessions</div></div>
         <div class="stat-box"><div class="stat-box-value ${thisSleep7Count >= 5 ? 'g' : 'a'}">${thisSleep7Count} / 7</div><div class="stat-box-label">7h+ sleep days</div></div>
@@ -3415,7 +3446,7 @@ function renderPhotoSlot(type, photo) {
   if (photo?.url) {
     return `<div style="border:0.5px dashed var(--border);border-radius:8px;overflow:hidden;position:relative;">
       <img src="${escapeHtml(photo.url)}" style="width:100%;height:180px;object-fit:cover;display:block;" />
-      <label style="position:absolute;bottom:8px;right:8px;background:var(--purple);color:#EEEDFE;border-radius:6px;padding:4px 10px;font-size:10px;font-weight:500;cursor:pointer;">
+      <label style="position:absolute;bottom:8px;right:8px;background:var(--purple);color:var(--purple-ink);border-radius:6px;padding:4px 10px;font-size:10px;font-weight:500;cursor:pointer;">
         Replace<input type="file" accept="image/*" data-photo-type="${type}" style="display:none;" />
       </label>
     </div>`;
@@ -4359,42 +4390,40 @@ function renderGoalsUI(analysis, cachedAt, period = 'weekly') {
   const monthLabel = new Date().toLocaleDateString('en-US',{month:'long',year:'numeric'});
 
   container.innerHTML = `
-    <div class="card" style="margin-bottom:10px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+    <div class="hero-card">
+      <div class="hero-top">
         <div>
-          <div style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.08em;color:var(--text3);margin-bottom:4px;">2026 Goals — Overall</div>
-          <div style="font-size:36px;font-weight:500;color:${sc(overall_score)};line-height:1;">${overall_score}<span style="font-size:16px;color:var(--text4);">%</span></div>
+          <div class="hero-label">2026 Goals — Overall</div>
+          <div class="hero-value" style="color:${sc(overall_score)};">${overall_score}<span style="font-size:var(--fs-md);color:var(--text4);">%</span></div>
+          <div class="hero-sub">${period==='weekly' ? weekLabel : monthLabel} &middot; updated ${cachedLabel}</div>
         </div>
         <div style="text-align:right;">
-          <div style="display:flex;gap:4px;margin-bottom:4px;">
+          <div style="display:flex;gap:4px;margin-bottom:8px;">
             <button onclick="renderGoalsUI(window._lastGoalsAnalysis,window._lastGoalsCachedAt,'weekly')"
-              style="font-size:11px;padding:4px 12px;border-radius:6px;cursor:pointer;border:0.5px solid ${period==='weekly'?'var(--purple)':'var(--border)'};background:${period==='weekly'?'var(--purple)':'var(--bg2)'};color:${period==='weekly'?'#EEEDFE':'var(--text4)'};">
+              style="font-size:11px;font-weight:600;padding:6px 12px;border-radius:var(--radius-sm);cursor:pointer;border:0.5px solid ${period==='weekly'?'var(--purple)':'var(--border)'};background:${period==='weekly'?'var(--purple)':'var(--bg2)'};color:${period==='weekly'?'var(--purple-ink)':'var(--text4)'};">
               This week
             </button>
             <button onclick="triggerGoalsAnalysis('monthly',false)"
-              style="font-size:11px;padding:4px 12px;border-radius:6px;cursor:pointer;border:0.5px solid ${period==='monthly'?'var(--purple)':'var(--border)'};background:${period==='monthly'?'var(--purple)':'var(--bg2)'};color:${period==='monthly'?'#EEEDFE':'var(--text4)'};">
+              style="font-size:11px;font-weight:600;padding:6px 12px;border-radius:var(--radius-sm);cursor:pointer;border:0.5px solid ${period==='monthly'?'var(--purple)':'var(--border)'};background:${period==='monthly'?'var(--purple)':'var(--bg2)'};color:${period==='monthly'?'var(--purple-ink)':'var(--text4)'};">
               This month
             </button>
           </div>
-          <div style="font-size:10px;color:var(--text4);text-align:right;margin-bottom:8px;">${period==='weekly' ? weekLabel : monthLabel}</div>
-          <div class="stat-grid-3" style="gap:6px;margin-bottom:8px;">
-            <div class="stat-box"><div class="stat-box-value g">${onTrack}</div><div class="stat-box-label">On track</div></div>
-            <div class="stat-box"><div class="stat-box-value ${atRisk>0?'a':'dim'}">${atRisk}</div><div class="stat-box-label">At risk</div></div>
-            <div class="stat-box"><div class="stat-box-value dim">${6-onTrack-atRisk}</div><div class="stat-box-label">No data</div></div>
-          </div>
-          <button class="btn-secondary" onclick="triggerGoalsAnalysis('${period}',true)" style="font-size:11px;padding:4px 12px;">🔄 Refresh</button>
+          <button class="btn-secondary" onclick="triggerGoalsAnalysis('${period}',true)" style="font-size:11px;">🔄 Refresh</button>
         </div>
       </div>
-      ${summary ? `<div style="background:var(--purple-bg);border-left:2px solid var(--purple);border-radius:0 8px 8px 0;padding:10px 14px;margin-bottom:10px;">
-        <p style="font-size:10px;font-weight:500;color:var(--text4);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">${period==='monthly'?'Monthly':'Weekly'} summary</p>
-        <p style="font-size:12px;color:var(--purple-light);line-height:1.7;">${escapeHtml(summary)}</p>
-      </div>` : ''}
-      ${top_priority ? `<div style="background:var(--amber-bg);border:0.5px solid var(--amber-border);border-radius:8px;padding:10px 14px;">
-        <p style="font-size:10px;font-weight:500;color:var(--text4);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Top priority this week</p>
-        <p style="font-size:13px;color:var(--amber);font-weight:500;">${escapeHtml(top_priority)}</p>
-      </div>` : ''}
-      <p style="font-size:10px;color:var(--text4);margin-top:8px;text-align:right;">Last updated: ${cachedLabel}</p>
+      <div class="hero-progress-track"><div class="hero-progress-fill" style="width:${overall_score}%;background:${sc(overall_score)};"></div></div>
+      <div class="hero-progress-caption"><span>${onTrack} on track &middot; ${atRisk} at risk &middot; ${6-onTrack-atRisk} no data</span><span>${overall_score}%</span></div>
     </div>
+
+    ${summary ? `<div class="card" style="border-left:2px solid var(--purple);">
+      <p class="card-title" style="margin-bottom:6px;">${period==='monthly'?'Monthly':'Weekly'} summary</p>
+      <p style="font-size:var(--fs-sm);color:var(--purple-light);line-height:1.7;">${escapeHtml(summary)}</p>
+    </div>` : ''}
+    ${top_priority ? `<div class="card" style="border-left:2px solid var(--amber);">
+      <p class="card-title" style="margin-bottom:6px;">Top priority this ${period==='monthly'?'month':'week'}</p>
+      <p style="font-size:var(--fs-base);color:var(--amber);font-weight:600;">${escapeHtml(top_priority)}</p>
+    </div>` : ''}
+
     ${section('📈','Trading',[1,2])}
     ${section('⚙️','Discipline System',[3])}
     ${section('💪','Fitness',[4])}
@@ -4442,29 +4471,19 @@ async function renderExpensesTab() {
   const reviewCount = reviewRows.length;
 
   container.innerHTML = `
-    <div class="card">
-      <div class="card-header">
+    <div class="hero-card">
+      <div class="hero-top">
         <div>
-          <p class="card-title" style="margin-bottom:2px;">Expenses</p>
-          <p class="card-meta">${monthLabel}</p>
+          <div class="hero-label">${monthLabel}</div>
+          <div class="hero-value">$${monthTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+          <div class="hero-sub">${monthCount} transaction${monthCount !== 1 ? 's' : ''} logged this month</div>
         </div>
-        <button class="btn-secondary" id="expense-add-btn">+ Add expense</button>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:10px;">
+          <span class="hero-status-pill" style="border:0.5px solid ${reviewCount ? 'var(--amber)' : 'var(--green)'};color:${reviewCount ? 'var(--amber)' : 'var(--green)'};">${reviewCount ? `⚠️ ${reviewCount} need review` : '✓ All reviewed'}</span>
+          <button class="btn-secondary" id="expense-add-btn">+ Add expense</button>
+        </div>
       </div>
       <div id="expense-add-form-wrap"></div>
-      <div class="stat-grid-3">
-        <div class="stat-box">
-          <div class="stat-box-value">$${monthTotal.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
-          <div class="stat-box-label">${monthLabel}</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-box-value">${monthCount}</div>
-          <div class="stat-box-label">Transactions</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-box-value" style="color:${reviewCount ? 'var(--amber)' : 'var(--text)'};">${reviewCount}</div>
-          <div class="stat-box-label">Needs review</div>
-        </div>
-      </div>
     </div>
 
     ${reviewCount ? `
@@ -4734,21 +4753,20 @@ const EXPENSE_CHARTS = {};
 // the same color whether you're looking at this month's doughnut or the
 // 12-month trend.
 const CATEGORY_COLORS = {
-  'Groceries': '#534AB7',
+  'Groceries': '#6366F1',
   'Restaurants': '#378ADD',
   'Subscriptions': '#1D9E75',
   'Leisure/Entertainment': '#EF9F27',
   'Transport': '#E24B4A',
-  'Phone & Utilities': '#7F77DD',
-  'Health': '#888888',
+  'Phone & Utilities': '#8B5CF6',
+  'Health': '#94A3B8',
   'Trading Expenses': '#F6BF26',
 };
 
 function renderExpenseCharts(categoryRows, allCategoryRows, recentRows) {
   Object.values(EXPENSE_CHARTS).forEach(c => c?.destroy());
 
-  const textColor = '#888888';
-  const gridColor = '#1e1e1e';
+  const { textColor, gridColor } = getThemeChartColors();
 
   const catEl = document.getElementById('expense-category-chart');
   if (catEl && categoryRows.length) {
