@@ -127,7 +127,7 @@ async function deleteConsistencyItem(itemName) {
 
 // Single-user app — email is fixed internally so the login screen only
 // asks for the password. Replace this before deploying.
-const LOGIN_EMAIL = 'andresvillamilpro@gmail.com';
+const LOGIN_EMAIL = 'REPLACE_WITH_YOUR_EMAIL@example.com';
 
 async function getCurrentUser() {
   const { data, error } = await sb.auth.getUser();
