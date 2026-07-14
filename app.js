@@ -361,8 +361,7 @@ async function renderDailyTab() {
     : rawConsistencyItems.filter(r => r.item_name !== 'Zinc');
   const consistencyItemNames = consistencyItems.map(r => r.item_name);
 
-  const [snapshot, routine, consistency, goals, tasks] = await Promise.all([
-    loadTradingSnapshot(),
+  const [routine, consistency, goals, tasks] = await Promise.all([
     loadChecklist('morning_routine_log', morningItems, today),
     loadChecklist('consistency_log', consistencyItemNames, today),
     loadTopGoals(today),
@@ -378,7 +377,6 @@ async function renderDailyTab() {
       ${renderEditableChecklistCard('Consistency check', 'consistency', consistency, consistencyItems)}
     </div>
     ${renderTaskListCard(tasks)}
-    ${renderTradingSnapshotBox(snapshot)}
   `;
 
   attachChecklistHandlers('morning_routine_log', 'morning-routine', morningItems);
@@ -409,117 +407,6 @@ function renderHeroCard(s, opts = {}) {
       <div class="hero-progress-track"><div class="hero-progress-fill" style="width:${progressPct}%;background:${pnlColor};"></div></div>
       <div class="hero-progress-caption"><span>Progress to profit target</span><span>${progressPct.toFixed(0)}%</span></div>
       ${opts.showMission ? `<div class="hero-mission">${MISSION_STATEMENT}</div>` : ''}
-    </div>
-  `;
-}
-
-// ---------- Trading snapshot box (Daily tab) ----------
-
-async function loadTradingSnapshot() {
-  const thisWeek = getMondayOfWeek();
-  const mondayISO = isoDate(thisWeek);
-
-  // Scoped to the 100k account — with two accounts now live, summing both
-  // accounts' dollar P&L against a single account_size would be meaningless.
-  // Full per-account detail lives on the Trading tab itself.
-  const [settingsRows, weekTradesRaw, allTradesRaw] = await Promise.all([
-    sb.from('trading_settings').select('*').limit(1).then(r => r.data),
-    sb.from('trades').select('profit, swap, commission, open_time').eq('account', '100k').gte('open_time', mondayISO + 'T00:00:00Z').then(r => r.data),
-    sb.from('trades').select('profit, swap, commission').eq('account', '100k').then(r => r.data)
-  ]);
-
-  const settings = settingsRows?.[0] || {
-    account_size: 100000, profit_target_pct: 10,
-    max_drawdown_pct: 10, daily_loss_limit_pct: 5,
-    max_trades_per_week: 10, max_losses_per_week: 3
-  };
-
-  const weekTrades = weekTradesRaw || [];
-  const allTrades = allTradesRaw || [];
-
-  const totalPnl = allTrades.reduce((sum, t) => sum + netResult(t), 0);
-  const accountSize = Number(settings.account_size);
-  const currentBalance = accountSize + totalPnl;
-  const pnlPct = (totalPnl / accountSize) * 100;
-
-  const weekPnl = weekTrades.reduce((sum, t) => sum + netResult(t), 0);
-  const weekWins = weekTrades.filter(t => netResult(t) > 0).length;
-  const weekLosses = weekTrades.filter(t => netResult(t) <= 0).length;
-
-  // Week status logic (same as Trading tab)
-  let weekStatus, weekStatusColor, weekAlert;
-  if (weekLosses >= Number(settings.max_losses_per_week)) {
-    weekStatus = '⛔ Stop trading — max losses reached';
-    weekStatusColor = 'var(--red)';
-    weekAlert = `${weekLosses} losses this week (limit: ${settings.max_losses_per_week}). No more trades until Monday.`;
-  } else if (weekTrades.length >= Number(settings.max_trades_per_week)) {
-    weekStatus = '⚠️ Trade limit reached';
-    weekStatusColor = 'var(--amber)';
-    weekAlert = `${weekTrades.length} trades taken (limit: ${settings.max_trades_per_week}). Wait until Monday.`;
-  } else if (weekPnl < -accountSize * 0.025) {
-    weekStatus = '⚠️ Down 2.5%+ this week';
-    weekStatusColor = 'var(--amber)';
-    weekAlert = `Down $${Math.abs(weekPnl).toFixed(0)} this week. Reduce size, focus on A+ setups only.`;
-  } else if (weekPnl > 0) {
-    weekStatus = '✅ Positive week';
-    weekStatusColor = 'var(--green)';
-    weekAlert = `Up $${weekPnl.toFixed(0)} this week. Protect the gains — A+ setups only.`;
-  } else if (weekTrades.length === 0) {
-    weekStatus = 'No trades yet this week';
-    weekStatusColor = 'var(--text4)';
-    weekAlert = 'Stay patient. Wait for A+ setups only.';
-  } else {
-    weekStatus = 'Negative week — stay disciplined';
-    weekStatusColor = 'var(--text3)';
-    weekAlert = `Down $${Math.abs(weekPnl).toFixed(0)} this week. Stick to the process.`;
-  }
-
-  return {
-    accountSize, currentBalance, pnlPct,
-    profitTargetPct: Number(settings.profit_target_pct),
-    weekPnl, weekWins, weekLosses,
-    weekTradesCount: weekTrades.length,
-    maxTradesPerWeek: Number(settings.max_trades_per_week),
-    maxLossesPerWeek: Number(settings.max_losses_per_week),
-    weekStatus, weekStatusColor, weekAlert
-  };
-}
-
-function renderTradingSnapshotBox(s) {
-  if (!s) return '';
-  const progressPct = Math.max(0, Math.min(100, (s.pnlPct / s.profitTargetPct) * 100));
-  const balColor = s.pnlPct >= 0 ? 'var(--green)' : 'var(--red)';
-  return `
-    <div class="card" style="border-left: 2px solid ${s.weekStatusColor};">
-      <div class="card-header">
-        <p class="card-title" style="margin-bottom:0;">Trading — this week</p>
-        <span style="font-size:11px; font-weight:500; color:${s.weekStatusColor};">${s.weekStatus}</span>
-      </div>
-      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px;">
-        <span style="font-size:var(--fs-lg);font-weight:700;color:${balColor};">$${Math.round(s.currentBalance).toLocaleString()}</span>
-        <span style="font-size:11px;color:var(--text4);">${s.pnlPct >= 0 ? '+' : ''}${s.pnlPct.toFixed(1)}% &middot; target ${s.profitTargetPct}%</span>
-      </div>
-      <div class="hero-progress-track" style="margin-top:0;"><div class="hero-progress-fill" style="width:${progressPct}%;background:${balColor};"></div></div>
-      <div class="hero-progress-caption" style="margin-bottom:10px;"><span>Progress to profit target</span><span>${progressPct.toFixed(0)}%</span></div>
-      <div style="background:var(--bg3); border-radius:6px; padding:8px 12px; margin-bottom:12px; font-size:12px; color:${s.weekStatusColor}; font-weight:500;">${s.weekAlert}</div>
-      <div class="stat-grid-4">
-        <div class="stat-box">
-          <div class="stat-box-value ${s.weekPnl >= 0 ? 'g' : 'r'}">${s.weekPnl >= 0 ? '+' : ''}$${s.weekPnl.toFixed(0)}</div>
-          <div class="stat-box-label">P&amp;L this week</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-box-value">${s.weekTradesCount} / ${s.maxTradesPerWeek}</div>
-          <div class="stat-box-label">Trades used</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-box-value ${s.weekLosses >= s.maxLossesPerWeek ? 'r' : 'w'}">${s.weekLosses} / ${s.maxLossesPerWeek}</div>
-          <div class="stat-box-label">Losses</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-box-value ${s.pnlPct >= 0 ? 'g' : 'r'}">${s.pnlPct >= 0 ? '+' : ''}${s.pnlPct.toFixed(1)}% / ${s.profitTargetPct}%</div>
-          <div class="stat-box-label">Total P&amp;L vs target</div>
-        </div>
-      </div>
     </div>
   `;
 }
@@ -1857,15 +1744,23 @@ async function renderTradingOverview() {
   const pnlPct10k = size10k ? ((bal10k - size10k) / size10k) * 100 : 0;
   const targetPct = Number(settings.profit_target_pct);
 
+  // Trades under $5 net (either direction) are noise — spread/commission
+  // wash, not a real win or loss — same rule as the account-detail page's
+  // "This week" card, applied here too since this card carries that same
+  // "This week" label.
+  const MIN_TRADE_SIZE_FOR_STATS = 5;
+  const thisWeek = getMondaySundayRange(0);
   // Trades this week — counted once. It's a copier setup (one trade
   // decision, mirrored to both accounts), so counting both would double it;
   // the 100k account's rows are used as the reference count.
-  const thisWeek = getMondaySundayRange(0);
-  const thisWeekTradesCount = trades100k.filter(t => new Date(t.open_time) >= thisWeek.start).length;
+  const thisWeekTrades100k = trades100k.filter(t => new Date(t.open_time) >= thisWeek.start && Math.abs(netResult(t)) >= MIN_TRADE_SIZE_FOR_STATS);
+  const thisWeekTradesCount = thisWeekTrades100k.length;
 
-  // Shared performance — pooled across both accounts, since these describe
-  // the trading decision itself (not either account's dollar outcome).
-  const { winRate, medianRMultiple } = computeTradeStats(allTrades);
+  // Shared performance — pooled across both accounts (same trade decision,
+  // not either account's dollar outcome) and scoped to this week, matching
+  // the card's own label.
+  const allTradesThisWeek = allTrades.filter(t => new Date(t.open_time) >= thisWeek.start && Math.abs(netResult(t)) >= MIN_TRADE_SIZE_FOR_STATS);
+  const { winRate, medianRMultiple } = computeTradeStats(allTradesThisWeek);
 
   const lastUpload = localStorage.getItem('trading_last_upload');
   const lastUploadText = lastUpload ? new Date(lastUpload).toLocaleString() : 'Never uploaded yet';
@@ -1884,7 +1779,7 @@ async function renderTradingOverview() {
         <div class="stat-box"><div class="stat-box-value ${winRate >= 50 ? 'g' : 'a'}">${winRate}%</div><div class="stat-box-label">Win rate</div></div>
         <div class="stat-box"><div class="stat-box-value">${medianRMultiple != null ? (medianRMultiple >= 0 ? '+' : '') + medianRMultiple.toFixed(2) + 'R' : '—'}</div><div class="stat-box-label">Median R-multiple</div></div>
       </div>
-      <p class="card-meta" style="margin-top:10px;">Same trade decision mirrored to both accounts — these reflect the decision itself, not either account's dollar result.</p>
+      <p class="card-meta" style="margin-top:10px;">Same trade decision mirrored to both accounts — reflects the decision itself, not either account's dollar result. Trades under $${MIN_TRADE_SIZE_FOR_STATS} net excluded.</p>
     </div>
 
     <div class="two-col">
