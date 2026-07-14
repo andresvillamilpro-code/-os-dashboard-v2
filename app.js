@@ -2456,15 +2456,15 @@ async function loadAndRenderDisciplineSection() {
   const scoreColor = (s) => s >= 95 ? 'var(--green)' : s >= 80 ? 'var(--amber)' : s > 0 ? 'var(--red)' : 'var(--text4)';
 
   el.innerHTML = `
+    <!-- Motivation verse -->
+    <div style="border-left:2px solid var(--purple);padding:10px 14px;background:var(--purple-bg);border-radius:0 8px 8px 0;margin-bottom:10px;font-size:12px;color:var(--purple-light);line-height:1.7;font-style:italic;font-weight:500;">
+      "Whatever you do, work heartily, as for the Lord and not for men." — Colossians 3:23
+    </div>
+
     <!-- Section divider -->
     <div style="display:flex;align-items:center;gap:10px;margin:4px 0 10px;">
       <div style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.08em;color:var(--text4);">Trading discipline &amp; performance</div>
       <div style="flex:1;height:0.5px;background:var(--border2);"></div>
-    </div>
-
-    <!-- Motivation verse -->
-    <div style="border-left:2px solid var(--purple);padding:10px 14px;background:var(--purple-bg);border-radius:0 8px 8px 0;margin-bottom:10px;font-size:12px;color:var(--purple-light);line-height:1.7;font-style:italic;font-weight:500;">
-      "Whatever you do, work heartily, as for the Lord and not for men." — Colossians 3:23
     </div>
 
     <!-- 3 KPI cards -->
