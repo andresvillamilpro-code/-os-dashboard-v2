@@ -3207,7 +3207,7 @@ async function loadAndRenderJournalSection(opts = {}) {
 // ============================================
 
 const MUSCLE_GROUPS = ['Chest', 'Back', 'Shoulders', 'Biceps', 'Triceps', 'Quads', 'Hamstrings', 'Glutes', 'Calves', 'Core'];
-const CARDIO_TYPES = ['Running', 'Cycling', 'Boxing'];
+const CARDIO_TYPES = ['Running', 'Cycling', 'Boxing', 'Tennis'];
 const STRENGTH_LIFTS = [
   { name: 'Bench press', unit: 'lb' },
   { name: 'Squat', unit: 'lb' },
@@ -3293,6 +3293,7 @@ async function toggleWorkoutDay(weekStart, dayDate, muscles, markComplete) {
       await sb.from('fitness_muscle_log').insert({ week_start: weekStart, muscle_group: muscle, day_date: dayDate, trained: markComplete, user_id: userId });
     }
   }));
+  await syncWorkoutDoneForDate(dayDate);
 }
 
 function attachWorkoutScheduleHandlers(weekStart) {
@@ -3385,8 +3386,12 @@ async function renderFitnessTab() {
   const cheatDays = weekData.cheat_days || 0;
 
   // ── This week live stats (always reflect current state) ──
-  const thisTrainingDays = new Set(muscleThis.filter(r => r.trained).map(r => r.day_date));
+  const thisMuscleTrainingDays = new Set(muscleThis.filter(r => r.trained).map(r => r.day_date));
   const thisCardioDays   = new Set(cardioThis.filter(r => r.done).map(r => r.day_date));
+  // "Days trained" counts any day with weight training OR cardio — cardio
+  // sessions still get their own separate stat below, this just also
+  // credits them toward the overall trained-days total.
+  const thisTrainingDays = new Set([...thisMuscleTrainingDays, ...thisCardioDays]);
   // Sleep count from consistency_log — same data as Daily tab
   const thisSleep7Count  = sleepConsistency.filter(r => r.completed).length;
   const currentWeight    = weightThis[0]?.weight_lbs;
@@ -3710,8 +3715,40 @@ function attachCardioGridHandlers(weekStart) {
       } else {
         await sb.from('fitness_cardio_log').insert({ week_start: weekStart, cardio_type, day_date, done, user_id: (await sb.auth.getUser()).data.user?.id });
       }
+      await syncWorkoutDoneForDate(day_date);
     });
   });
+}
+
+// Cardio and weight training both count as "the workout" for the day —
+// checking either one (or both) auto-reflects in Log today's session's
+// "Workout completed as planned" instead of needing to check it a third
+// time. Recomputed from scratch on every toggle (not just set-to-true) so
+// unchecking the only activity of the day correctly flips it back off,
+// while other still-completed activity keeps it on.
+async function syncWorkoutDoneForDate(dayDate) {
+  const [{ data: muscleRows }, { data: cardioRows }, { data: existingArr }] = await Promise.all([
+    sb.from('fitness_muscle_log').select('trained').eq('day_date', dayDate).eq('trained', true).limit(1),
+    sb.from('fitness_cardio_log').select('done').eq('day_date', dayDate).eq('done', true).limit(1),
+    sb.from('fitness_daily_session').select('*').eq('session_date', dayDate).limit(1)
+  ]);
+  const anyActivity = (muscleRows && muscleRows.length > 0) || (cardioRows && cardioRows.length > 0);
+  const existing = existingArr?.[0] || null;
+
+  // Don't create a session row for a day nothing happened on and none existed.
+  if (!existing && !anyActivity) return;
+
+  const { data: { user } } = await sb.auth.getUser();
+  const session = {
+    session_date: dayDate,
+    user_id: user?.id,
+    workout_done: anyActivity,
+    protein_done: existing?.protein_done || false,
+    nutrition_done: existing?.nutrition_done || false,
+    energy_rating: existing?.energy_rating ?? null,
+  };
+  session.discipline_score = calcFitnessDailyScore(session);
+  await sb.from('fitness_daily_session').upsert(session, { onConflict: 'user_id,session_date' });
 }
 
 function attachStrengthHandlers() {
