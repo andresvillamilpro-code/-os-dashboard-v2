@@ -1951,6 +1951,12 @@ async function renderTradingTab() {
   const fridayEnd = new Date(thisWeek.start); fridayEnd.setDate(fridayEnd.getDate() + 4);
   const fridayStr = fridayEnd.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 
+  const weeklyOverride = settings.weekly_override || null;
+  const displayPnl = weeklyOverride?.pnl != null ? Number(weeklyOverride.pnl) : thisWeekPnl;
+  const displayTradesUsed = weeklyOverride?.trades != null ? Number(weeklyOverride.trades) : thisWeekTrades.length;
+  const displayLosses = weeklyOverride?.losses != null ? Number(weeklyOverride.losses) : thisWeekLosses;
+  const displayWinRate = weeklyOverride?.winRate != null ? Number(weeklyOverride.winRate) : (thisWeekTrades.length ? thisWeekStats.winRate : null);
+
   container.innerHTML = `
     ${renderHeroCard({
       currentBalance, pnlPct,
@@ -1963,25 +1969,67 @@ async function renderTradingTab() {
     <div class="card" style="border-left: 2px solid ${weekStatusColor};">
       <div class="card-header">
         <p class="card-title" style="margin-bottom:0;">This week — ${mondayStr} to ${fridayStr}</p>
-        <span style="font-size:11px; font-weight:500; color:${weekStatusColor};">${weekStatus}</span>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span style="font-size:11px; font-weight:500; color:${weekStatusColor};">${weekStatus}</span>
+          <span class="settings-gear-btn" id="week-stats-settings-toggle" title="Correct these numbers">⚙️</span>
+        </div>
       </div>
       <div style="background:${weekStatusBg}; border-radius:6px; padding:10px 12px; margin-bottom:12px; font-size:12px; color:${weekStatusColor}; font-weight:500;">${weekAlert}</div>
+      ${weeklyOverride ? `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--amber-bg);border:0.5px solid var(--amber-border);border-radius:6px;padding:6px 10px;margin-bottom:10px;font-size:11px;color:var(--amber);">
+          <span>✏️ These numbers are manually overridden, not calculated from trades.</span>
+          <span id="week-override-clear-btn" style="cursor:pointer;text-decoration:underline;white-space:nowrap;">Clear override</span>
+        </div>
+      ` : ''}
       <div class="stat-grid-4">
         <div class="stat-box">
-          <div class="stat-box-value ${thisWeekPnl >= 0 ? 'g' : 'r'}">${thisWeekPnl >= 0 ? '+' : ''}$${thisWeekPnl.toFixed(0)}</div>
+          <div class="stat-box-value ${displayPnl >= 0 ? 'g' : 'r'}">${displayPnl >= 0 ? '+' : ''}$${displayPnl.toFixed(0)}</div>
           <div class="stat-box-label">P&amp;L this week</div>
         </div>
         <div class="stat-box">
-          <div class="stat-box-value">${thisWeekTrades.length} / ${settings.max_trades_per_week}</div>
+          <div class="stat-box-value">${displayTradesUsed} / ${settings.max_trades_per_week}</div>
           <div class="stat-box-label">Trades used</div>
         </div>
         <div class="stat-box">
-          <div class="stat-box-value ${thisWeekLosses >= settings.max_losses_per_week ? 'r' : 'w'}">${thisWeekLosses} / ${settings.max_losses_per_week}</div>
+          <div class="stat-box-value ${displayLosses >= settings.max_losses_per_week ? 'r' : 'w'}">${displayLosses} / ${settings.max_losses_per_week}</div>
           <div class="stat-box-label">Losses</div>
         </div>
         <div class="stat-box">
-          <div class="stat-box-value ${thisWeekStats.winRate >= 50 ? 'g' : 'a'}">${thisWeekTrades.length ? thisWeekStats.winRate + '%' : '—'}</div>
+          <div class="stat-box-value ${displayWinRate >= 50 ? 'g' : 'a'}">${displayWinRate != null ? displayWinRate + '%' : '—'}</div>
           <div class="stat-box-label">Win rate</div>
+        </div>
+      </div>
+
+      <div id="week-stats-settings-panel" class="settings-panel" style="display:none;margin-top:12px;">
+        <p class="card-title" style="margin-top:2px;">Correct this week's numbers</p>
+
+        <div style="margin-bottom:14px;">
+          <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:6px;">Option 1 — fix the actual trade (recommended, updates everywhere)</div>
+          ${thisWeekTrades.length ? thisWeekTrades.map(t => `
+            <div class="card" style="background:var(--bg3);margin-bottom:6px;padding:10px;" data-trade-edit-row="${t.id}">
+              <div style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text4);margin-bottom:6px;">
+                <span style="font-weight:600;color:var(--text2);">${escapeHtml(t.symbol || '—')}</span>
+                <span>${new Date(t.open_time).toLocaleDateString()}</span>
+              </div>
+              <div class="journal-grid-3">
+                <div class="journal-field"><label>Profit</label><input type="number" step="any" data-trade-field="profit" value="${t.profit ?? 0}" /></div>
+                <div class="journal-field"><label>Swap</label><input type="number" step="any" data-trade-field="swap" value="${t.swap ?? 0}" /></div>
+                <div class="journal-field"><label>Commission</label><input type="number" step="any" data-trade-field="commission" value="${t.commission ?? 0}" /></div>
+              </div>
+              <button type="button" class="btn-secondary trade-edit-save-btn" data-trade-id="${t.id}" style="margin-top:8px;font-size:11px;">Save trade</button>
+            </div>
+          `).join('') : '<p class="card-meta">No trades this week yet.</p>'}
+        </div>
+
+        <div>
+          <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:6px;">Option 2 — manual override (doesn't touch trade data)</div>
+          <div class="journal-grid-2" style="margin-bottom:8px;">
+            <div class="journal-field"><label>P&amp;L this week ($)</label><input type="number" step="any" id="override-pnl" value="${weeklyOverride?.pnl ?? ''}" /></div>
+            <div class="journal-field"><label>Trades used</label><input type="number" step="1" id="override-trades" value="${weeklyOverride?.trades ?? ''}" /></div>
+            <div class="journal-field"><label>Losses</label><input type="number" step="1" id="override-losses" value="${weeklyOverride?.losses ?? ''}" /></div>
+            <div class="journal-field"><label>Win rate (%)</label><input type="number" step="any" id="override-winrate" value="${weeklyOverride?.winRate ?? ''}" /></div>
+          </div>
+          <button type="button" class="btn-secondary" id="week-override-save-btn">Save override</button>
         </div>
       </div>
     </div>
@@ -2068,6 +2116,7 @@ async function renderTradingTab() {
 
   attachTradingSettingsHandler();
   attachTradingSettingsToggle();
+  attachWeekStatsSettingsHandlers();
   attachCsvUploadHandler();
   drawTradingCharts({ balancePoints, byInstrument, byDowWins, byDowLosses, dowNames, byHour });
 
@@ -2086,6 +2135,71 @@ function attachTradingSettingsToggle() {
     const isOpen = panel.style.display !== 'none';
     panel.style.display = isOpen ? 'none' : 'block';
   });
+}
+
+function attachWeekStatsSettingsHandlers() {
+  const toggleBtn = document.getElementById('week-stats-settings-toggle');
+  const panel = document.getElementById('week-stats-settings-panel');
+  if (toggleBtn && panel) {
+    toggleBtn.addEventListener('click', () => {
+      panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+    });
+  }
+
+  // Option 1 — fix the actual trade
+  document.querySelectorAll('.trade-edit-save-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const row = btn.closest('[data-trade-edit-row]');
+      if (!row) return;
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+      const fields = {};
+      row.querySelectorAll('[data-trade-field]').forEach(input => {
+        fields[input.dataset.tradeField] = parseFloat(input.value) || 0;
+      });
+      const { error } = await sb.from('trades').update(fields).eq('id', btn.dataset.tradeId);
+      if (error) {
+        alert('Could not save trade: ' + error.message);
+        btn.disabled = false;
+        btn.textContent = 'Save trade';
+        return;
+      }
+      renderTradingTab();
+    });
+  });
+
+  // Option 2 — manual override
+  const saveOverrideBtn = document.getElementById('week-override-save-btn');
+  if (saveOverrideBtn) {
+    saveOverrideBtn.addEventListener('click', async () => {
+      const pnl = document.getElementById('override-pnl').value;
+      const tradesUsed = document.getElementById('override-trades').value;
+      const losses = document.getElementById('override-losses').value;
+      const winRate = document.getElementById('override-winrate').value;
+
+      if (pnl === '' && tradesUsed === '' && losses === '' && winRate === '') {
+        alert('Enter at least one value to override.');
+        return;
+      }
+
+      const override = {
+        pnl: pnl === '' ? null : parseFloat(pnl),
+        trades: tradesUsed === '' ? null : parseInt(tradesUsed, 10),
+        losses: losses === '' ? null : parseInt(losses, 10),
+        winRate: winRate === '' ? null : parseFloat(winRate)
+      };
+      await saveTradingSettings({ weekly_override: override });
+      renderTradingTab();
+    });
+  }
+
+  const clearOverrideBtn = document.getElementById('week-override-clear-btn');
+  if (clearOverrideBtn) {
+    clearOverrideBtn.addEventListener('click', async () => {
+      await saveTradingSettings({ weekly_override: null });
+      renderTradingTab();
+    });
+  }
 }
 
 function attachTradingSettingsHandler() {
@@ -2389,8 +2503,9 @@ async function loadAndRenderDisciplineSection() {
     <div class="card">
       <div class="card-header">
         <p class="card-title" style="margin-bottom:0;">Log today's session</p>
-        ${todaySession ? `<span style="font-size:11px;font-weight:500;color:var(--green);">✅ Logged — score: ${todaySession.discipline_score}%</span>` : '<span class="card-meta">Not logged yet</span>'}
+        ${todaySession ? `<span style="font-size:11px;font-weight:500;color:var(--green);">✅ Logged — score: ${todaySession.discipline_score}%</span>` : '<span class="card-meta">Not logged yet — save a journal entry above, then "Proceed with discipline session"</span>'}
       </div>
+      <div id="session-form-panel" style="display:none;">
       <form id="session-form">
         ${DISCIPLINE_SECTIONS.map(sec => `
           <div style="margin-bottom:12px;">
@@ -2432,6 +2547,7 @@ async function loadAndRenderDisciplineSection() {
           <button type="submit" class="btn-secondary">Save session</button>
         </div>
       </form>
+      </div>
     </div>
 
     <!-- Recent sessions -->
@@ -3062,6 +3178,8 @@ async function loadAndRenderJournalSection(opts = {}) {
   const proceedBtn = document.getElementById('journal-proceed-discipline-btn');
   if (proceedBtn) {
     proceedBtn.addEventListener('click', () => {
+      const sessionPanel = document.getElementById('session-form-panel');
+      if (sessionPanel) sessionPanel.style.display = 'block';
       document.getElementById('discipline-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
   }
