@@ -386,6 +386,7 @@ async function renderDailyTab() {
   attachTopGoalsHandlers();
   attachTaskListHandlers(tasks);
   initGoogleCalendar();
+  loadTopbarStatus();
 }
 
 function renderHeroCard(s, opts = {}) {
@@ -4862,6 +4863,43 @@ function renderExpenseCharts(categoryRows, allCategoryRows, recentRows) {
   }
 }
 
+// ---------- Topbar status strip ----------
+// Mirrors the exact same completion logic as the Daily tab (same zinc-day
+// filtering, same tables) so the numbers shown here always agree with what
+// the Daily tab itself shows — this is supplementary, not a second source
+// of truth.
+async function loadTopbarStatus() {
+  const el = document.getElementById('topbar-status');
+  if (!el) return;
+  try {
+    const today = todayISO();
+    const rawItems = await loadConsistencyItems();
+    const items = isZincDay(today) ? rawItems : rawItems.filter(r => r.item_name !== 'Zinc');
+    const itemNames = items.map(r => r.item_name);
+
+    const [{ data: goalsData }, { data: logData }, { data: fitnessSession }] = await Promise.all([
+      sb.from('top_goals').select('completed').eq('log_date', today),
+      sb.from('consistency_log').select('item_name, completed').eq('log_date', today),
+      sb.from('fitness_daily_session').select('id').eq('session_date', today).limit(1)
+    ]);
+
+    const goalsDone = (goalsData || []).filter(g => g.completed).length;
+    const doneNames = new Set((logData || []).filter(r => r.completed).map(r => r.item_name));
+    const habitsDone = itemNames.filter(n => doneNames.has(n)).length;
+    const gymLogged = (fitnessSession || []).length > 0;
+
+    el.innerHTML = `
+      <span>🎯 ${goalsDone}/3 Top Goals</span>
+      <span class="tb-status-sep">·</span>
+      <span>✅ ${habitsDone}/${itemNames.length} Habits</span>
+      <span class="tb-status-sep">·</span>
+      <span>${gymLogged ? '💪 Gym logged' : '💪 Gym pending'}</span>
+    `;
+  } catch (err) {
+    // Supplementary status strip — fail silently rather than show an error in the header
+  }
+}
+
 async function initApp() {
   try {
     const user = await Promise.race([
@@ -4873,6 +4911,7 @@ async function initApp() {
       return;
     }
     switchTab('daily');
+    loadTopbarStatus();
   } catch (err) {
     const el = document.getElementById('tab-content');
     if (el) el.innerHTML = `<div class="card"><p class="card-title" style="color:var(--red)">Startup failed</p><p class="empty-state">${escapeHtmlSafe(err.message)}</p></div>`;
