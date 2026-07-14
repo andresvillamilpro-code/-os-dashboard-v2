@@ -93,7 +93,11 @@
     body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; transition: background .2s, color .2s; }
 
     /* ── TOP BAR ── */
-    .topbar { position: sticky; top: 0; z-index: 100; background: var(--topbar-bg); border-bottom: 0.5px solid var(--border2); padding: 10px 20px 0; transition: background .2s; }
+    .topbar { position: fixed; top: 0; left: 0; right: 0; z-index: 100; background: var(--topbar-bg); border-bottom: 0.5px solid var(--border2); padding: 10px 20px 0; transition: background .2s, padding .25s ease; }
+    .topbar.scrolled { padding-top: 8px; }
+    .topbar-welcome { transition: max-height .25s ease, opacity .2s ease; overflow: hidden; max-height: 110px; opacity: 1; }
+    .topbar.scrolled .topbar-welcome { max-height: 0; opacity: 0; }
+    .topbar.scrolled .tb-hero { padding: 0; }
     .tb-nav-row { display: flex; align-items: center; gap: var(--sp-5); }
     .tb-logo { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
     .tb-icon { font-size: 18px; }
@@ -131,6 +135,7 @@
     .tb-status-sep { color: var(--border); }
 
     /* ── MAIN CONTENT ── */
+    #app { padding-top: 160px; transition: padding-top .1s linear; }
     .main { padding: 20px; max-width: 1400px; margin: 0 auto; }
     .main.main-wide { max-width: none; }
 
@@ -365,6 +370,7 @@
 </head>
 <body>
 
+<div id="scroll-sentinel" style="position:absolute; top:0; left:0; height:1px; width:1px;"></div>
 <div class="topbar">
   <div class="tb-nav-row">
     <div class="tb-logo">
@@ -447,6 +453,35 @@
 
   // Apply saved theme on load
   applyTheme(localStorage.getItem('os_theme') || 'dark');
+
+  // Scroll-aware topbar, done properly this time:
+  // - .topbar is position:fixed (not sticky), so it's fully removed from
+  //   document flow — animating its height can't create the feedback loop
+  //   that sticky caused, because nothing downstream needs to "make room"
+  //   for it in the normal layout calculation.
+  // - Since fixed elements don't reserve space, #app needs an explicit
+  //   padding-top to sit below it. ResizeObserver keeps that padding
+  //   continuously matched to the topbar's actual rendered height — a real
+  //   live measurement, not a guessed pixel value — so it tracks correctly
+  //   through the whole collapse/expand transition, at any content length.
+  const scrollSentinel = document.getElementById('scroll-sentinel');
+  const topbarEl = document.querySelector('.topbar');
+  const appEl = document.getElementById('app');
+
+  if (topbarEl && appEl && 'ResizeObserver' in window) {
+    const syncAppOffset = () => { appEl.style.paddingTop = topbarEl.offsetHeight + 'px'; };
+    new ResizeObserver(syncAppOffset).observe(topbarEl);
+    syncAppOffset();
+  }
+
+  if (scrollSentinel && topbarEl && 'IntersectionObserver' in window) {
+    const topbarScrollObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        topbarEl.classList.toggle('scrolled', !entry.isIntersecting);
+      });
+    }, { rootMargin: '-60px 0px 0px 0px', threshold: 0 });
+    topbarScrollObserver.observe(scrollSentinel);
+  }
 
   // Live clock — compact: HH:MM (no seconds) + weekday only, to keep this
   // from competing visually with the actual content below it.
