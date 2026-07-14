@@ -308,7 +308,7 @@ function escapeHtml(str) {
 
 const TAB_RENDERERS = {
   daily: renderDailyTab,
-  trading: renderTradingTab,
+  trading: renderTradingOverview,
   fitness: renderFitnessTab,
   goals: renderGoalsTab,
   calendar: renderCalendarTab,
@@ -419,10 +419,13 @@ async function loadTradingSnapshot() {
   const thisWeek = getMondayOfWeek();
   const mondayISO = isoDate(thisWeek);
 
+  // Scoped to the 100k account — with two accounts now live, summing both
+  // accounts' dollar P&L against a single account_size would be meaningless.
+  // Full per-account detail lives on the Trading tab itself.
   const [settingsRows, weekTradesRaw, allTradesRaw] = await Promise.all([
     sb.from('trading_settings').select('*').limit(1).then(r => r.data),
-    sb.from('trades').select('profit, swap, commission, open_time').gte('open_time', mondayISO + 'T00:00:00Z').then(r => r.data),
-    sb.from('trades').select('profit, swap, commission').then(r => r.data)
+    sb.from('trades').select('profit, swap, commission, open_time').eq('account', '100k').gte('open_time', mondayISO + 'T00:00:00Z').then(r => r.data),
+    sb.from('trades').select('profit, swap, commission').eq('account', '100k').then(r => r.data)
   ]);
 
   const settings = settingsRows?.[0] || {
@@ -1666,7 +1669,7 @@ function findColIndex(headers, ...candidates) {
   return -1;
 }
 
-function parseFtmoCsv(text) {
+function parseFtmoCsv(text, account) {
   const rows = parseCSV(text);
   if (rows.length < 2) return [];
   const headers = rows[0];
@@ -1722,6 +1725,7 @@ function parseFtmoCsv(text) {
 
     trades.push({
       ticket,
+      account,
       open_time: openTime.toISOString(),
       close_time: closeTime ? closeTime.toISOString() : null,
       trade_type: idx.type >= 0 ? (r[idx.type] || '').toLowerCase() : null,
@@ -1741,25 +1745,25 @@ function parseFtmoCsv(text) {
   return trades;
 }
 
-async function importTradesFromCsv(file, statusEl) {
+async function importTradesFromCsv(file, statusEl, account) {
   statusEl.textContent = 'Reading file...';
   const text = await file.text();
-  const parsed = parseFtmoCsv(text);
+  const parsed = parseFtmoCsv(text, account);
   if (!parsed.length) {
     statusEl.textContent = 'No valid trades found in that file.';
     return;
   }
 
   statusEl.textContent = `Found ${parsed.length} trades — importing (existing trades get refreshed too)...`;
-  const { error } = await sb.from('trades').upsert(parsed, { onConflict: 'user_id,ticket' });
+  const { error } = await sb.from('trades').upsert(parsed, { onConflict: 'user_id,account,ticket' });
   if (error) {
     statusEl.textContent = `Import failed: ${error.message}`;
     return;
   }
 
   localStorage.setItem('trading_last_upload', new Date().toISOString());
-  statusEl.textContent = `Imported/refreshed ${parsed.length} trades from file.`;
-  renderTradingTab();
+  statusEl.textContent = `Imported/refreshed ${parsed.length} trades into the ${account} account.`;
+  renderTradingOverview();
 }
 
 // ---------- Settings ----------
@@ -1767,7 +1771,7 @@ async function importTradesFromCsv(file, statusEl) {
 async function loadTradingSettings() {
   const { data } = await sb.from('trading_settings').select('*').limit(1);
   return data?.[0] || {
-    account_size: 100000, profit_target_pct: 10,
+    account_size: 100000, account_size_10k: 10000, profit_target_pct: 10,
     max_drawdown_pct: 10, daily_loss_limit_pct: 5,
     max_trades_per_week: 10, max_losses_per_week: 3
   };
@@ -1829,7 +1833,104 @@ function maxStreak(trades, predicate) {
 
 // ---------- Render ----------
 
-async function renderTradingTab() {
+async function renderTradingOverview() {
+  const container = document.getElementById('tab-content');
+  container.innerHTML = `<p class="loading-text">Loading trading overview...</p>`;
+
+  const user = await requireAuth();
+  if (!user) return;
+
+  const [settings, { data: allTradesRaw }] = await Promise.all([
+    loadTradingSettings(),
+    sb.from('trades').select('*')
+  ]);
+  const allTrades = allTradesRaw || [];
+  const trades100k = allTrades.filter(t => t.account === '100k');
+  const trades10k = allTrades.filter(t => t.account === '10k');
+
+  const balanceFor = (accTrades, size) => size + accTrades.reduce((s, t) => s + netResult(t), 0);
+  const size100k = Number(settings.account_size);
+  const size10k = Number(settings.account_size_10k);
+  const bal100k = balanceFor(trades100k, size100k);
+  const bal10k = balanceFor(trades10k, size10k);
+  const pnlPct100k = size100k ? ((bal100k - size100k) / size100k) * 100 : 0;
+  const pnlPct10k = size10k ? ((bal10k - size10k) / size10k) * 100 : 0;
+  const targetPct = Number(settings.profit_target_pct);
+
+  // Trades this week — counted once. It's a copier setup (one trade
+  // decision, mirrored to both accounts), so counting both would double it;
+  // the 100k account's rows are used as the reference count.
+  const thisWeek = getMondaySundayRange(0);
+  const thisWeekTradesCount = trades100k.filter(t => new Date(t.open_time) >= thisWeek.start).length;
+
+  // Shared performance — pooled across both accounts, since these describe
+  // the trading decision itself (not either account's dollar outcome).
+  const { winRate, medianRMultiple } = computeTradeStats(allTrades);
+
+  const lastUpload = localStorage.getItem('trading_last_upload');
+  const lastUploadText = lastUpload ? new Date(lastUpload).toLocaleString() : 'Never uploaded yet';
+
+  const progressPct = (pct) => Math.max(0, Math.min(100, targetPct ? (pct / targetPct) * 100 : 0));
+
+  container.innerHTML = `
+    <div style="border-left:2px solid var(--purple);padding:10px 14px;background:var(--purple-bg);border-radius:0 8px 8px 0;margin-bottom:12px;font-size:12px;color:var(--purple-light);line-height:1.7;font-style:italic;font-weight:500;">
+      "Whatever you do, work heartily, as for the Lord and not for men." — Colossians 3:23
+    </div>
+
+    <div class="card">
+      <p class="card-title">This week — shared across both accounts</p>
+      <div class="stat-grid-3">
+        <div class="stat-box"><div class="stat-box-value">${thisWeekTradesCount}</div><div class="stat-box-label">Trades this week</div></div>
+        <div class="stat-box"><div class="stat-box-value ${winRate >= 50 ? 'g' : 'a'}">${winRate}%</div><div class="stat-box-label">Win rate</div></div>
+        <div class="stat-box"><div class="stat-box-value">${medianRMultiple != null ? (medianRMultiple >= 0 ? '+' : '') + medianRMultiple.toFixed(2) + 'R' : '—'}</div><div class="stat-box-label">Median R-multiple</div></div>
+      </div>
+      <p class="card-meta" style="margin-top:10px;">Same trade decision mirrored to both accounts — these reflect the decision itself, not either account's dollar result.</p>
+    </div>
+
+    <div class="two-col">
+      <div class="card" id="account-card-100k" style="cursor:pointer;border-left:2px solid var(--purple);">
+        <p class="card-title">100K Account</p>
+        <div style="font-size:var(--fs-xl);font-weight:700;letter-spacing:-.01em;color:${pnlPct100k >= 0 ? 'var(--green)' : 'var(--red)'};">$${Math.round(bal100k).toLocaleString()}</div>
+        <div class="hero-sub">${pnlPct100k >= 0 ? '+' : ''}${pnlPct100k.toFixed(1)}% &middot; target ${targetPct}%</div>
+        <div class="hero-progress-track"><div class="hero-progress-fill" style="width:${progressPct(pnlPct100k)}%;background:${pnlPct100k >= 0 ? 'var(--green)' : 'var(--red)'};"></div></div>
+        <p class="card-meta" style="margin-top:10px;">${trades100k.length} trades &middot; click to view full detail →</p>
+      </div>
+      <div class="card" id="account-card-10k" style="cursor:pointer;border-left:2px solid var(--purple);">
+        <p class="card-title">10K Account</p>
+        <div style="font-size:var(--fs-xl);font-weight:700;letter-spacing:-.01em;color:${pnlPct10k >= 0 ? 'var(--green)' : 'var(--red)'};">$${Math.round(bal10k).toLocaleString()}</div>
+        <div class="hero-sub">${pnlPct10k >= 0 ? '+' : ''}${pnlPct10k.toFixed(1)}% &middot; target ${targetPct}%</div>
+        <div class="hero-progress-track"><div class="hero-progress-fill" style="width:${progressPct(pnlPct10k)}%;background:${pnlPct10k >= 0 ? 'var(--green)' : 'var(--red)'};"></div></div>
+        <p class="card-meta" style="margin-top:10px;">${trades10k.length} trades &middot; click to view full detail →</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <p class="card-title">Import trades</p>
+      <div class="journal-field" style="margin-bottom:10px;max-width:220px;">
+        <label>Account</label>
+        <select id="csv-account-select">
+          <option value="100k">100K account</option>
+          <option value="10k">10K account</option>
+        </select>
+      </div>
+      <div class="upload-row">
+        <label class="file-input-btn">Upload FTMO CSV<input type="file" id="csv-input" accept=".csv" /></label>
+        <span class="upload-status" id="upload-status">Last upload: ${lastUploadText}</span>
+      </div>
+    </div>
+
+    <div id="discipline-section"><p class="loading-text">Loading discipline stats...</p></div>
+  `;
+
+  document.getElementById('account-card-100k')?.addEventListener('click', () => renderTradingAccountDetail('100k'));
+  document.getElementById('account-card-10k')?.addEventListener('click', () => renderTradingAccountDetail('10k'));
+  attachCsvUploadHandler();
+
+  // Load discipline section async (doesn't block the main render)
+  loadAndRenderDisciplineSection();
+}
+
+async function renderTradingAccountDetail(account) {
   const container = document.getElementById('tab-content');
   container.innerHTML = `<p class="loading-text">Loading trading data...</p>`;
 
@@ -1838,11 +1939,11 @@ async function renderTradingTab() {
 
   const [settings, { data: tradesRaw }] = await Promise.all([
     loadTradingSettings(),
-    sb.from('trades').select('*').order('open_time', { ascending: true })
+    sb.from('trades').select('*').eq('account', account).order('open_time', { ascending: true })
   ]);
   const trades = tradesRaw || [];
 
-  const accountSize = Number(settings.account_size);
+  const accountSize = account === '10k' ? Number(settings.account_size_10k) : Number(settings.account_size);
   const totalPnl = trades.reduce((sum, t) => sum + netResult(t), 0);
   const currentBalance = accountSize + totalPnl;
   const targetBalance = accountSize * (1 + Number(settings.profit_target_pct) / 100);
@@ -1957,9 +2058,6 @@ async function renderTradingTab() {
     : 0;
   const amountToGo = Math.max(0, targetBalance - currentBalance);
 
-  const lastUpload = localStorage.getItem('trading_last_upload');
-  const lastUploadText = lastUpload ? new Date(lastUpload).toLocaleString() : 'Never uploaded yet';
-
   const mondayStr = thisWeek.start.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   const fridayEnd = new Date(thisWeek.start); fridayEnd.setDate(fridayEnd.getDate() + 4);
   const fridayStr = fridayEnd.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
@@ -1971,6 +2069,11 @@ async function renderTradingTab() {
   const displayWinRate = weeklyOverride?.winRate != null ? Number(weeklyOverride.winRate) : (thisWeekTrades.length ? thisWeekStats.winRate : null);
 
   container.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+      <button type="button" class="btn-secondary" id="back-to-overview-btn" style="background:var(--bg3);color:var(--text3);">← Overview</button>
+      <span style="font-size:13px;font-weight:600;color:var(--text2);">${account === '10k' ? '10K Account' : '100K Account'}</span>
+    </div>
+
     <div style="border-left:2px solid var(--purple);padding:10px 14px;background:var(--purple-bg);border-radius:0 8px 8px 0;margin-bottom:12px;font-size:12px;color:var(--purple-light);line-height:1.7;font-style:italic;font-weight:500;">
       "Whatever you do, work heartily, as for the Lord and not for men." — Colossians 3:23
     </div>
@@ -2052,14 +2155,6 @@ async function renderTradingTab() {
       </div>
     </div>
 
-    <div class="card">
-      <p class="card-title">Import trades</p>
-      <div class="upload-row">
-        <label class="file-input-btn">Upload FTMO CSV<input type="file" id="csv-input" accept=".csv" /></label>
-        <span class="upload-status" id="upload-status">Last upload: ${lastUploadText}</span>
-      </div>
-    </div>
-
     <div class="stat-grid-3">
       <div class="card stat-box"><div class="stat-box-value ${winRate >= 50 ? 'g' : 'a'}">${winRate}%</div><div class="stat-box-label">Win rate (all-time)</div></div>
       <div class="card stat-box"><div class="stat-box-value">${trades.length}</div><div class="stat-box-label">Total trades</div></div>
@@ -2075,7 +2170,7 @@ async function renderTradingTab() {
       <div id="trading-settings-panel" class="settings-panel" style="display:none;">
         <p class="card-title" style="margin-top:2px;">Account settings</p>
         <form id="trading-settings-form" class="settings-grid">
-          <div class="settings-field"><label>Account size ($)</label><input type="text" name="account_size" value="${accountSize}" /></div>
+          <div class="settings-field"><label>Account size ($)</label><input type="text" name="${account === '10k' ? 'account_size_10k' : 'account_size'}" value="${accountSize}" /></div>
           <div class="settings-field"><label>Profit target (%)</label><input type="text" name="profit_target_pct" value="${settings.profit_target_pct}" /></div>
           <div class="settings-field"><label>Max trades / week</label><input type="text" name="max_trades_per_week" value="${settings.max_trades_per_week}" /></div>
           <div class="settings-field"><label>Max losses / week</label><input type="text" name="max_losses_per_week" value="${settings.max_losses_per_week}" /></div>
@@ -2128,21 +2223,16 @@ async function renderTradingTab() {
         <div style="font-size:11px;color:var(--red);margin-top:4px;">−$${loserProfits.length ? Math.abs(loserProfits.reduce((a,b)=>a+b,0)/loserProfits.length).toFixed(0) : '—'} avg loss</div>
       </div>
     </div>
-
-    <div id="discipline-section"><p class="loading-text">Loading discipline stats...</p></div>
   `;
 
+  document.getElementById('back-to-overview-btn')?.addEventListener('click', renderTradingOverview);
   attachTradingSettingsHandler();
   attachTradingSettingsToggle();
   attachWeekStatsSettingsHandlers();
-  attachCsvUploadHandler();
   drawTradingCharts({ balancePoints, byInstrument, byDowWins, byDowLosses, dowNames, byHour });
 
-  // Load discipline section async (doesn't block the main render)
-  loadAndRenderDisciplineSection();
-
   // Load trading journal section async (doesn't block the main render)
-  loadAndRenderJournalSection();
+  loadAndRenderJournalSection({ account });
 }
 
 function attachTradingSettingsToggle() {
@@ -2182,7 +2272,7 @@ function attachWeekStatsSettingsHandlers() {
         btn.textContent = 'Save trade';
         return;
       }
-      renderTradingTab();
+      renderTradingAccountDetail(journalCurrentAccount);
     });
   });
 
@@ -2207,7 +2297,7 @@ function attachWeekStatsSettingsHandlers() {
         winRate: winRate === '' ? null : parseFloat(winRate)
       };
       await saveTradingSettings({ weekly_override: override });
-      renderTradingTab();
+      renderTradingAccountDetail(journalCurrentAccount);
     });
   }
 
@@ -2215,7 +2305,7 @@ function attachWeekStatsSettingsHandlers() {
   if (clearOverrideBtn) {
     clearOverrideBtn.addEventListener('click', async () => {
       await saveTradingSettings({ weekly_override: null });
-      renderTradingTab();
+      renderTradingAccountDetail(journalCurrentAccount);
     });
   }
 }
@@ -2239,12 +2329,14 @@ function attachTradingSettingsHandler() {
 function attachCsvUploadHandler() {
   const input = document.getElementById('csv-input');
   const statusEl = document.getElementById('upload-status');
+  const accountSelect = document.getElementById('csv-account-select');
   if (!input || !statusEl) return;
   input.addEventListener('change', async () => {
     const file = input.files?.[0];
     if (!file) return;
+    const account = accountSelect ? accountSelect.value : '100k';
     try {
-      await importTradesFromCsv(file, statusEl);
+      await importTradesFromCsv(file, statusEl, account);
     } catch (err) {
       statusEl.textContent = `Import error: ${err.message}`;
     }
@@ -2725,7 +2817,11 @@ function computeJournalMetrics(e) {
   const stopLoss = Number(e.stop_loss);
   const takeProfit = e.take_profit != null && e.take_profit !== '' ? Number(e.take_profit) : null;
   const closePrice = e.close_price != null && e.close_price !== '' ? Number(e.close_price) : null;
-  const riskPct = e.risk_percent != null && e.risk_percent !== '' ? Number(e.risk_percent) : null;
+  // 'Both' entries (copier trade) may have a different risk % per account —
+  // use whichever matches the journal currently being viewed.
+  const riskPct = (e.account === 'both' && journalCurrentAccount === '10k' && e.risk_percent_10k != null)
+    ? Number(e.risk_percent_10k)
+    : (e.risk_percent != null && e.risk_percent !== '' ? Number(e.risk_percent) : null);
   const isBuy = e.trade_type === 'BUY';
 
   const riskDistance = isBuy ? (entryPrice - stopLoss) : (stopLoss - entryPrice);
@@ -2849,9 +2945,11 @@ function attachTagPickerHandlers(fieldId) {
 // journal row to a trade row, it just offers the trade's own numbers as a
 // one-click starting point so you're not retyping what the CSV already has.
 let journalRecentTradesInfo = { trades: [], label: '' };
+// Which account's journal is currently open — set by loadAndRenderJournalSection.
+let journalCurrentAccount = '100k';
 
-async function loadRecentTradesForJournal() {
-  const { data } = await sb.from('trades').select('*').order('open_time', { ascending: false }).limit(30);
+async function loadRecentTradesForJournal(account) {
+  const { data } = await sb.from('trades').select('*').eq('account', account).order('open_time', { ascending: false }).limit(30);
   if (!data || !data.length) return { trades: [], label: '' };
 
   const localDate = (isoStr) => new Date(isoStr).toLocaleDateString('en-CA'); // YYYY-MM-DD in local tz
@@ -2918,30 +3016,54 @@ function attachTradeRecommendationHandlers() {
 function rerenderJournalForm() {
   const panel = document.getElementById('journal-form-panel');
   if (!panel) return;
-  panel.innerHTML = renderJournalEntryForm();
+  const prefill = journalEditingEntryId ? journalEntriesCache[journalEditingEntryId] : null;
+  panel.innerHTML = renderJournalEntryForm(prefill);
   attachJournalFormHandlers();
 }
 
 // ---------- Entry form ----------
 
-function renderJournalEntryForm() {
+function renderJournalEntryForm(prefill = null) {
+  const p = prefill || {};
   return `
     <form id="journal-entry-form">
       ${renderTradeRecommendations()}
+      ${prefill ? `<div class="card-meta" style="margin-bottom:10px;">✏️ Continuing draft from ${escapeHtml(p.entry_date || '')} — save as draft again, or complete it below.</div>` : ''}
       <div class="journal-section-label">Setup</div>
       <div class="journal-grid-3">
-        <div class="journal-field"><label>Date</label><input type="date" name="entry_date" value="${todayISO()}" required /></div>
-        <div class="journal-field"><label>Asset</label><input type="text" name="asset" placeholder="BTC, NAS100, GOLD..." required /></div>
+        <div class="journal-field"><label>Date</label><input type="date" name="entry_date" value="${p.entry_date || todayISO()}" required /></div>
+        <div class="journal-field"><label>Asset</label><input type="text" name="asset" placeholder="BTC, NAS100, GOLD..." value="${escapeHtml(p.asset || '')}" required /></div>
         <div class="journal-field"><label>Type</label>
           <select name="trade_type" required>
-            <option value="BUY">BUY</option>
-            <option value="SELL">SELL</option>
+            <option value="BUY" ${p.trade_type === 'BUY' || !p.trade_type ? 'selected' : ''}>BUY</option>
+            <option value="SELL" ${p.trade_type === 'SELL' ? 'selected' : ''}>SELL</option>
           </select>
         </div>
       </div>
+      <div class="journal-grid-3" style="margin-top:10px;">
+        <div class="journal-field">
+          <label>Account</label>
+          <select name="account" id="jf-account-select">
+            <option value="100k" ${(p.account || journalCurrentAccount) === '100k' ? 'selected' : ''}>100K</option>
+            <option value="10k" ${(p.account || journalCurrentAccount) === '10k' ? 'selected' : ''}>10K</option>
+            <option value="both" ${p.account === 'both' ? 'selected' : ''}>Both (copier trade)</option>
+          </select>
+        </div>
+        <div class="journal-field" id="jf-same-risk-wrap" style="display:${p.account === 'both' ? 'flex' : 'none'};">
+          <label>Same risk on both?</label>
+          <select id="jf-same-risk-select">
+            <option value="yes" ${p.risk_percent_10k == null ? 'selected' : ''}>Yes</option>
+            <option value="no" ${p.risk_percent_10k != null ? 'selected' : ''}>No, set separately</option>
+          </select>
+        </div>
+        <div class="journal-field" id="jf-risk-10k-wrap" style="display:${p.account === 'both' && p.risk_percent_10k != null ? 'flex' : 'none'};">
+          <label>Risk % — 10K account</label>
+          <input type="number" step="0.01" name="risk_percent_10k" placeholder="3" value="${p.risk_percent_10k ?? ''}" />
+        </div>
+      </div>
       <div class="journal-grid-2" style="margin-top:10px;">
-        <div class="journal-field"><label>Risk %</label><input type="number" step="0.01" name="risk_percent" placeholder="3" required /></div>
-        <div class="journal-field"><label>Entry time (optional)</label><input type="time" name="entry_time" /></div>
+        <div class="journal-field"><label id="jf-risk-primary-label">Risk %</label><input type="number" step="0.01" name="risk_percent" placeholder="3" value="${p.risk_percent ?? ''}" required /></div>
+        <div class="journal-field"><label>Entry time (optional)</label><input type="time" name="entry_time" value="${p.entry_time || ''}" /></div>
       </div>
       <div style="margin-top:10px;">${renderTagPicker('jf-timeframe', 'Timeframe')}</div>
 
@@ -2950,43 +3072,62 @@ function renderJournalEntryForm() {
       <div style="margin-top:10px;">${renderTagPicker('jf-setup', 'Trade confirmation / setup')}</div>
       <div class="journal-field" style="margin-top:10px;">
         <label>TradingView links — before (one per line)</label>
-        <textarea name="chart_links_before" placeholder="https://www.tradingview.com/x/..."></textarea>
+        <textarea name="chart_links_before" placeholder="https://www.tradingview.com/x/...">${escapeHtml(p.chart_links_before || '')}</textarea>
       </div>
 
       <div class="journal-section-label">Execution</div>
       <div class="journal-grid-3">
-        <div class="journal-field"><label>Entry price</label><input type="number" step="any" name="entry_price" required /></div>
-        <div class="journal-field"><label>Stop loss</label><input type="number" step="any" name="stop_loss" required /></div>
-        <div class="journal-field"><label>Take profit (optional)</label><input type="number" step="any" name="take_profit" /></div>
+        <div class="journal-field"><label>Entry price</label><input type="number" step="any" name="entry_price" value="${p.entry_price ?? ''}" required /></div>
+        <div class="journal-field"><label>Stop loss</label><input type="number" step="any" name="stop_loss" value="${p.stop_loss ?? ''}" required /></div>
+        <div class="journal-field"><label>Take profit (optional)</label><input type="number" step="any" name="take_profit" value="${p.take_profit ?? ''}" /></div>
       </div>
       <div class="journal-grid-2" style="margin-top:10px;">
-        <div class="journal-field"><label>Close time (optional)</label><input type="time" name="close_time" /></div>
-        <div class="journal-field"><label>Close price (leave blank if still open)</label><input type="number" step="any" name="close_price" /></div>
+        <div class="journal-field"><label>Close time (optional)</label><input type="time" name="close_time" value="${p.close_time || ''}" /></div>
+        <div class="journal-field"><label>Close price (leave blank if still open)</label><input type="number" step="any" name="close_price" value="${p.close_price ?? ''}" /></div>
       </div>
 
       <div class="journal-section-label">Reflection — after the trade</div>
       <div>${renderTagPicker('jf-emotion-after', 'Emotion after')}</div>
       <div class="journal-field" style="margin-top:10px;">
         <label>Conclusion / lesson</label>
-        <textarea name="conclusion_lesson" placeholder="What happened, what you'd do differently..."></textarea>
+        <textarea name="conclusion_lesson" placeholder="What happened, what you'd do differently...">${escapeHtml(p.conclusion_lesson || '')}</textarea>
       </div>
       <div class="journal-field" style="margin-top:10px;">
         <label>TradingView links — after (one per line)</label>
-        <textarea name="chart_links_after" placeholder="https://www.tradingview.com/x/..."></textarea>
+        <textarea name="chart_links_after" placeholder="https://www.tradingview.com/x/...">${escapeHtml(p.chart_links_after || '')}</textarea>
       </div>
 
       <div id="journal-form-error" style="font-size:11px;color:var(--red);margin-top:8px;"></div>
 
       <div style="display:flex;gap:8px;margin-top:16px;padding-top:14px;border-top:0.5px solid var(--border2);">
-        <button type="submit" class="btn-secondary">Save entry</button>
+        <button type="submit" class="btn-secondary">${prefill ? 'Save & complete' : 'Save entry'}</button>
+        <button type="submit" formnovalidate class="btn-secondary" id="journal-save-draft-btn" style="background:var(--amber-bg);color:var(--amber);">Save as draft</button>
         <button type="button" class="btn-secondary" id="journal-form-cancel" style="background:var(--bg3);color:var(--text3);">Cancel</button>
       </div>
     </form>
   `;
 }
 
+// Tracks which existing draft (if any) is being resumed — null means the
+// form will INSERT a new row on save, otherwise it UPDATEs this row.
+let journalEditingEntryId = null;
+// Full entry objects keyed by id, refreshed on every section render, so
+// "Continue editing" can pull the complete row without a re-fetch.
+let journalEntriesCache = {};
+
 function resetJournalFormSelections() {
   journalFormSelections = { 'jf-timeframe': [], 'jf-emotion-before': [], 'jf-setup': [], 'jf-emotion-after': [] };
+  journalEditingEntryId = null;
+}
+
+function loadFormSelectionsFromEntry(entry) {
+  journalFormSelections = {
+    'jf-timeframe': [...(entry.timeframe || [])],
+    'jf-emotion-before': [...(entry.emotion_before || [])],
+    'jf-setup': [...(entry.setup_confirmations || [])],
+    'jf-emotion-after': [...(entry.emotion_after || [])]
+  };
+  journalEditingEntryId = entry.id;
 }
 
 function attachJournalFormHandlers() {
@@ -2996,6 +3137,24 @@ function attachJournalFormHandlers() {
   const form = document.getElementById('journal-entry-form');
   const errorEl = document.getElementById('journal-form-error');
   const cancelBtn = document.getElementById('journal-form-cancel');
+
+  const accountSelect = document.getElementById('jf-account-select');
+  const sameRiskWrap = document.getElementById('jf-same-risk-wrap');
+  const sameRiskSelect = document.getElementById('jf-same-risk-select');
+  const risk10kWrap = document.getElementById('jf-risk-10k-wrap');
+  const riskPrimaryLabel = document.getElementById('jf-risk-primary-label');
+
+  const syncRiskFields = () => {
+    const isBoth = accountSelect?.value === 'both';
+    if (sameRiskWrap) sameRiskWrap.style.display = isBoth ? 'flex' : 'none';
+    const isDifferent = isBoth && sameRiskSelect?.value === 'no';
+    if (risk10kWrap) risk10kWrap.style.display = isDifferent ? 'flex' : 'none';
+    if (riskPrimaryLabel) riskPrimaryLabel.textContent = isDifferent ? 'Risk % — 100K account' : 'Risk %';
+    const risk10kInput = form?.querySelector('[name="risk_percent_10k"]');
+    if (risk10kInput && !isDifferent) risk10kInput.value = '';
+  };
+  accountSelect?.addEventListener('change', syncRiskFields);
+  sameRiskSelect?.addEventListener('change', syncRiskFields);
 
   if (cancelBtn) {
     cancelBtn.addEventListener('click', () => {
@@ -3009,36 +3168,52 @@ function attachJournalFormHandlers() {
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       if (errorEl) errorEl.textContent = '';
+      const isDraft = e.submitter?.id === 'journal-save-draft-btn';
       const fd = new FormData(form);
       const { data: { user } } = await sb.auth.getUser();
 
+      const numOrNull = (name) => (fd.get(name) ? parseFloat(fd.get(name)) : null);
+
       const entry = {
         user_id: user?.id,
-        entry_date: fd.get('entry_date'),
-        asset: (fd.get('asset') || '').trim().toUpperCase(),
+        status: isDraft ? 'draft' : 'complete',
+        account: fd.get('account') || '100k',
+        entry_date: fd.get('entry_date') || null,
+        asset: (fd.get('asset') || '').trim().toUpperCase() || null,
         trade_type: fd.get('trade_type'),
         entry_time: fd.get('entry_time') || null,
         close_time: fd.get('close_time') || null,
-        risk_percent: parseFloat(fd.get('risk_percent')) || null,
+        risk_percent: numOrNull('risk_percent'),
+        risk_percent_10k: numOrNull('risk_percent_10k'),
         timeframe: journalFormSelections['jf-timeframe'],
         chart_links_before: (fd.get('chart_links_before') || '').trim() || null,
         emotion_before: journalFormSelections['jf-emotion-before'],
         setup_confirmations: journalFormSelections['jf-setup'],
-        entry_price: parseFloat(fd.get('entry_price')),
-        stop_loss: parseFloat(fd.get('stop_loss')),
-        take_profit: fd.get('take_profit') ? parseFloat(fd.get('take_profit')) : null,
-        close_price: fd.get('close_price') ? parseFloat(fd.get('close_price')) : null,
+        entry_price: numOrNull('entry_price'),
+        stop_loss: numOrNull('stop_loss'),
+        take_profit: numOrNull('take_profit'),
+        close_price: numOrNull('close_price'),
         emotion_after: journalFormSelections['jf-emotion-after'],
         conclusion_lesson: (fd.get('conclusion_lesson') || '').trim() || null,
         chart_links_after: (fd.get('chart_links_after') || '').trim() || null
       };
 
-      if (!entry.asset || !entry.entry_date || Number.isNaN(entry.entry_price) || Number.isNaN(entry.stop_loss) || !entry.risk_percent) {
-        if (errorEl) errorEl.textContent = 'Date, asset, entry price, stop loss, and risk % are required.';
+      // Drafts only need a date to be findable later — everything else can
+      // wait until the trade actually closes. Complete entries keep the
+      // full original requirement.
+      if (isDraft) {
+        if (!entry.entry_date) {
+          if (errorEl) errorEl.textContent = 'At least a date is needed to save a draft.';
+          return;
+        }
+      } else if (!entry.asset || !entry.entry_date || entry.entry_price == null || entry.stop_loss == null || !entry.risk_percent) {
+        if (errorEl) errorEl.textContent = 'Date, asset, entry price, stop loss, and risk % are required to mark this complete — or use "Save as draft" instead.';
         return;
       }
 
-      const { error } = await sb.from('trading_journal').insert(entry);
+      const { error } = journalEditingEntryId
+        ? await sb.from('trading_journal').update(entry).eq('id', journalEditingEntryId)
+        : await sb.from('trading_journal').insert(entry);
       if (error) {
         if (errorEl) errorEl.textContent = 'Save failed: ' + error.message;
         return;
@@ -3047,7 +3222,7 @@ function attachJournalFormHandlers() {
       resetJournalFormSelections();
       const panel = document.getElementById('journal-form-panel');
       if (panel) panel.style.display = 'none';
-      loadAndRenderJournalSection({ justSaved: true });
+      loadAndRenderJournalSection({ justSaved: !isDraft });
     });
   }
 }
@@ -3082,8 +3257,9 @@ function groupJournalEntriesByWeek(entries) {
 }
 
 function computeJournalWeekStats(weekEntries) {
+  const complete = weekEntries.filter(e => e.status !== 'draft');
   let wins = 0, losses = 0, be = 0, netPnl = 0, closedCount = 0;
-  weekEntries.forEach(e => {
+  complete.forEach(e => {
     const m = computeJournalMetrics(e);
     if (m.result === 'WIN') wins++;
     else if (m.result === 'LOSS') losses++;
@@ -3092,7 +3268,7 @@ function computeJournalWeekStats(weekEntries) {
   });
   const decided = wins + losses; // BE and open trades excluded from win-rate math
   const winRate = decided ? Math.round((wins / decided) * 100) : null;
-  return { count: weekEntries.length, wins, losses, be, winRate, netPnl, closedCount };
+  return { count: complete.length, wins, losses, be, winRate, netPnl, closedCount };
 }
 
 function renderJournalWeekHeader(group, isOpen) {
@@ -3112,20 +3288,26 @@ function renderJournalWeekHeader(group, isOpen) {
 }
 
 function renderJournalEntryRow(entry) {
+  const isDraft = entry.status === 'draft';
   const m = computeJournalMetrics(entry);
   const badgeClass = m.result === 'WIN' ? 'win' : m.result === 'LOSS' ? 'loss' : m.result === 'BE' ? 'be' : '';
   const pnlText = m.pnlPercent != null ? `${m.pnlPercent >= 0 ? '+' : ''}${m.pnlPercent.toFixed(2)}%` : '—';
   const pnlColor = m.pnlPercent == null ? 'var(--text4)' : m.pnlPercent >= 0 ? 'var(--green)' : 'var(--red)';
-  const dateShort = entry.entry_date.slice(5); // MM-DD, the week header already carries the year/range
+  const dateShort = (entry.entry_date || '').slice(5); // MM-DD, the week header already carries the year/range
+
+  let statusBadge;
+  if (isDraft) statusBadge = '<span class="journal-result-badge" style="background:var(--amber-bg);color:var(--amber);">📝 Draft</span>';
+  else if (m.result) statusBadge = `<span class="journal-result-badge ${badgeClass}">${m.result}</span>`;
+  else statusBadge = '<span class="card-meta">Open</span>';
 
   return `
     <div class="journal-entry-row" data-entry-id="${entry.id}">
       <div class="journal-row-grid">
-        <span style="font-size:12px;color:var(--text2);">${dateShort}</span>
+        <span style="font-size:12px;color:var(--text2);">${dateShort || '—'}</span>
         <span style="font-size:11px;color:var(--text4);">${m.dayOfWeek ? m.dayOfWeek.slice(0, 3) : '—'}</span>
-        <span style="font-size:12px;font-weight:500;color:var(--text2);">${escapeHtml(entry.asset)}</span>
-        <span style="font-size:11px;color:var(--text3);">${entry.trade_type}</span>
-        ${m.result ? `<span class="journal-result-badge ${badgeClass}">${m.result}</span>` : '<span class="card-meta">Open</span>'}
+        <span style="font-size:12px;font-weight:500;color:var(--text2);">${escapeHtml(entry.asset || '—')}${entry.account === 'both' ? ' <span style="font-size:9px;color:var(--purple-light);font-weight:600;">BOTH</span>' : ''}</span>
+        <span style="font-size:11px;color:var(--text3);">${entry.trade_type || '—'}</span>
+        ${statusBadge}
         <span style="font-size:12px;font-weight:500;text-align:right;color:${pnlColor};">${pnlText}</span>
       </div>
       <div class="journal-entry-detail" id="journal-detail-${entry.id}">
@@ -3134,8 +3316,8 @@ function renderJournalEntryRow(entry) {
           <div><b>Planned R:R:</b> ${m.plannedR != null ? '1:' + m.plannedR.toFixed(2) : '—'}</div>
           <div><b>Actual R:</b> ${m.actualR != null ? m.actualR.toFixed(2) + 'R' : '—'}</div>
           <div><b>Duration:</b> ${m.duration || '—'}</div>
-          <div><b>Entry:</b> ${entry.entry_price}</div>
-          <div><b>Stop loss:</b> ${entry.stop_loss}</div>
+          <div><b>Entry:</b> ${entry.entry_price ?? '—'}</div>
+          <div><b>Stop loss:</b> ${entry.stop_loss ?? '—'}</div>
           <div><b>Take profit:</b> ${entry.take_profit ?? '—'}</div>
           <div><b>Close:</b> ${entry.close_price ?? '—'}</div>
           <div><b>Emotion before:</b> ${(entry.emotion_before || []).join(', ') || '—'}</div>
@@ -3145,7 +3327,8 @@ function renderJournalEntryRow(entry) {
         <div style="margin-top:8px;"><b>Conclusion / lesson:</b><br/>${entry.conclusion_lesson ? escapeHtml(entry.conclusion_lesson) : '—'}</div>
         <div class="journal-links" style="margin-top:8px;"><b>Charts before:</b><br/>${formatJournalLinks(entry.chart_links_before)}</div>
         <div class="journal-links" style="margin-top:8px;"><b>Charts after:</b><br/>${formatJournalLinks(entry.chart_links_after)}</div>
-        <div style="margin-top:10px;">
+        <div style="margin-top:10px;display:flex;gap:14px;align-items:center;">
+          ${isDraft ? `<span class="journal-continue-btn" data-entry-id="${entry.id}" style="cursor:pointer;color:var(--amber);font-size:11px;font-weight:600;">✏️ Continue editing</span>` : ''}
           <span class="consistency-delete-btn journal-delete-btn" data-entry-id="${entry.id}" style="cursor:pointer;color:var(--red);font-size:11px;">Delete entry</span>
         </div>
       </div>
@@ -3179,10 +3362,25 @@ function attachJournalHistoryHandlers() {
   });
   document.querySelectorAll('.journal-entry-row').forEach(row => {
     row.addEventListener('click', (e) => {
-      if (e.target.classList.contains('journal-delete-btn')) return;
+      if (e.target.classList.contains('journal-delete-btn') || e.target.classList.contains('journal-continue-btn')) return;
       const id = row.dataset.entryId;
       const detail = document.getElementById(`journal-detail-${id}`);
       if (detail) detail.classList.toggle('open');
+    });
+  });
+  document.querySelectorAll('.journal-continue-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const entry = journalEntriesCache[btn.dataset.entryId];
+      if (!entry) return;
+      loadFormSelectionsFromEntry(entry);
+      const panel = document.getElementById('journal-form-panel');
+      if (panel) {
+        panel.innerHTML = renderJournalEntryForm(entry);
+        panel.style.display = 'block';
+        attachJournalFormHandlers();
+        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
     });
   });
   document.querySelectorAll('.journal-delete-btn').forEach(btn => {
@@ -3197,9 +3395,10 @@ function attachJournalHistoryHandlers() {
 }
 
 function computeJournalOverallStats(entries) {
+  const complete = entries.filter(e => e.status !== 'draft');
   let wins = 0, losses = 0, netPnl = 0;
   const rValues = [];
-  entries.forEach(e => {
+  complete.forEach(e => {
     const m = computeJournalMetrics(e);
     if (m.result === 'WIN') wins++;
     else if (m.result === 'LOSS') losses++;
@@ -3209,7 +3408,7 @@ function computeJournalOverallStats(entries) {
   const decided = wins + losses;
   const winRate = decided ? Math.round((wins / decided) * 100) : null;
   const avgR = rValues.length ? rValues.reduce((a, b) => a + b, 0) / rValues.length : null;
-  return { total: entries.length, winRate, avgR, netPnl };
+  return { total: complete.length, winRate, avgR, netPnl };
 }
 
 // ---------- Section orchestrator ----------
@@ -3217,14 +3416,17 @@ function computeJournalOverallStats(entries) {
 async function loadAndRenderJournalSection(opts = {}) {
   const el = document.getElementById('journal-section');
   if (!el) return;
+  if (opts.account) journalCurrentAccount = opts.account;
 
   const [, { data: entriesRaw }, tradesInfo] = await Promise.all([
     loadJournalTags(),
-    sb.from('trading_journal').select('*').order('entry_date', { ascending: false }),
-    loadRecentTradesForJournal()
+    sb.from('trading_journal').select('*').or(`account.eq.${journalCurrentAccount},account.eq.both`).order('entry_date', { ascending: false }),
+    loadRecentTradesForJournal(journalCurrentAccount)
   ]);
   journalRecentTradesInfo = tradesInfo;
   const entries = entriesRaw || [];
+  journalEntriesCache = {};
+  entries.forEach(e => { journalEntriesCache[e.id] = e; });
   resetJournalFormSelections();
 
   const weekGroups = groupJournalEntriesByWeek(entries);
@@ -3265,7 +3467,9 @@ async function loadAndRenderJournalSection(opts = {}) {
 
   const proceedBtn = document.getElementById('journal-proceed-discipline-btn');
   if (proceedBtn) {
-    proceedBtn.addEventListener('click', () => {
+    proceedBtn.addEventListener('click', async () => {
+      await renderTradingOverview();
+      await loadAndRenderDisciplineSection(); // ensure it's actually rendered before we try to open it
       const sessionPanel = document.getElementById('session-form-panel');
       if (sessionPanel) sessionPanel.style.display = 'block';
       document.getElementById('discipline-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -4504,11 +4708,11 @@ async function computeDisciplineSystemGoal() {
   return { id: 3, score, trend, status: habitStatusFromScore(score, true), insight };
 }
 
-// Goal 2 — FTMO Challenge Progress
+// Goal 2 — FTMO Challenge Progress (the $100K challenge specifically)
 async function computeTradingChallengeGoal() {
   const [settingsRes, tradesRes] = await Promise.all([
     sb.from('trading_settings').select('*').limit(1),
-    sb.from('trades').select('open_time, profit, swap, commission'),
+    sb.from('trades').select('open_time, profit, swap, commission').eq('account', '100k'),
   ]);
   const trades = tradesRes.data || [];
   const settings = settingsRes.data?.[0] || {};
