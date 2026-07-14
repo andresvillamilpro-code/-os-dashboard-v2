@@ -1844,8 +1844,14 @@ async function renderTradingTab() {
   const { wins, losses, winRate, medianRMultiple } = computeTradeStats(trades);
 
   // ── THIS WEEK (Mon–Fri window) ──
+  // Trades under $5 net (either direction) are treated as noise — spread/
+  // commission wash, not a real win or loss — and excluded from the "This
+  // week" card's stats only. thisWeekTradesRaw (unfiltered) still backs the
+  // trade-edit panel so every trade, including tiny ones, stays editable.
+  const MIN_TRADE_SIZE_FOR_STATS = 5;
   const thisWeek = getMondaySundayRange(0);
-  const thisWeekTrades = trades.filter(t => new Date(t.open_time) >= thisWeek.start);
+  const thisWeekTradesRaw = trades.filter(t => new Date(t.open_time) >= thisWeek.start);
+  const thisWeekTrades = thisWeekTradesRaw.filter(t => Math.abs(netResult(t)) >= MIN_TRADE_SIZE_FOR_STATS);
   const thisWeekStats = computeTradeStats(thisWeekTrades);
   const thisWeekPnl = thisWeekTrades.reduce((s, t) => s + netResult(t), 0);
   const thisWeekLosses = thisWeekTrades.filter(t => netResult(t) <= 0).length;
@@ -1975,6 +1981,7 @@ async function renderTradingTab() {
         </div>
       </div>
       <div style="background:${weekStatusBg}; border-radius:6px; padding:10px 12px; margin-bottom:12px; font-size:12px; color:${weekStatusColor}; font-weight:500;">${weekAlert}</div>
+      <div class="card-meta" style="margin-bottom:10px;">Trades under $${MIN_TRADE_SIZE_FOR_STATS} net (spread/commission wash) are excluded from these stats.</div>
       ${weeklyOverride ? `
         <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--amber-bg);border:0.5px solid var(--amber-border);border-radius:6px;padding:6px 10px;margin-bottom:10px;font-size:11px;color:var(--amber);">
           <span>✏️ These numbers are manually overridden, not calculated from trades.</span>
@@ -2005,7 +2012,7 @@ async function renderTradingTab() {
 
         <div style="margin-bottom:14px;">
           <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:6px;">Option 1 — fix the actual trade (recommended, updates everywhere)</div>
-          ${thisWeekTrades.length ? thisWeekTrades.map(t => `
+          ${thisWeekTradesRaw.length ? thisWeekTradesRaw.map(t => `
             <div class="card" style="background:var(--bg3);margin-bottom:6px;padding:10px;" data-trade-edit-row="${t.id}">
               <div style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text4);margin-bottom:6px;">
                 <span style="font-weight:600;color:var(--text2);">${escapeHtml(t.symbol || '—')}</span>
