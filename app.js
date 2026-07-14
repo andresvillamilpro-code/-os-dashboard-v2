@@ -4410,6 +4410,11 @@ async function computeHabitGoal(goalId) {
   return { id: goalId, score: 0, trend: 'no_data', status: 'no_data', insight: 'Not yet implemented.' };
 }
 
+// How much each priority tier counts toward the Overall score — critical
+// goals move the needle 3x as much as medium ones, instead of every goal
+// counting equally regardless of its priority badge.
+const PRIORITY_WEIGHT = { critical: 3, high: 2, medium: 1, support: 1 };
+
 // Compute all client-side goals and merge them into the cached analysis
 async function mergeHabitGoalsIntoAnalysis(analysis) {
   const base = analysis || {};
@@ -4422,8 +4427,10 @@ async function mergeHabitGoalsIntoAnalysis(analysis) {
   });
   goals.sort((a, b) => a.id - b.id);
   const scored = goals.filter(g => g.status !== 'no_data');
-  const overall_score = scored.length
-    ? Math.round(scored.reduce((s, g) => s + (g.score || 0), 0) / scored.length)
+  const weightOf = (id) => PRIORITY_WEIGHT[GOALS_META.find(m => m.id === id)?.priority] || 1;
+  const weightSum = scored.reduce((s, g) => s + weightOf(g.id), 0);
+  const overall_score = weightSum
+    ? Math.round(scored.reduce((s, g) => s + (g.score || 0) * weightOf(g.id), 0) / weightSum)
     : 0;
   return { ...base, goals, overall_score };
 }
