@@ -369,8 +369,8 @@ async function renderDailyTab() {
   ]);
 
   container.innerHTML = `
-    ${renderCalendarCard()}
     <div class="identity-banner">${MISSION_STATEMENT}</div>
+    ${renderCalendarCard()}
     ${renderTopGoalsCard(goals)}
     <div class="two-col">
       ${renderChecklistCard('Morning routine', 'morning-routine', routine)}
@@ -570,6 +570,12 @@ function attachChecklistHandlers(table, idPrefix, items) {
         await sb.from(table).update({ completed }).eq('id', existing.id);
       } else {
         await sb.from(table).insert({ log_date: today, item_name: itemName, completed, user_id: (await sb.auth.getUser()).data.user?.id });
+      }
+
+      // '160g protein' drives Fitness's "Protein target reached" directly —
+      // no separate checkbox to keep in sync by hand.
+      if (table === 'consistency_log' && itemName === '160g protein') {
+        await syncProteinDoneForDate(today);
       }
     });
   });
@@ -3310,8 +3316,6 @@ function attachWorkoutScheduleHandlers(weekStart) {
   });
 }
 const WEIGHT_GOAL_LBS = 200;
-// Supplement items synced with Daily tab's consistency_log (same table, same data)
-const SUPPLEMENT_ITEMS = ['160g protein', 'Creatine', 'Zinc', 'Magnesium'];
 
 function fitnessWeekStart(weeksAgo = 0) {
   const mon = getMondayOfWeek();
@@ -3363,7 +3367,6 @@ async function renderFitnessTab() {
     strength,
     sleepConsistency,
     weightThis,
-    supplementsToday,
     photoRows,
     todaySessionArr,
     weekDataArr
@@ -3374,7 +3377,6 @@ async function renderFitnessTab() {
     // Sleep now lives in consistency_log (synced with Daily tab)
     safeQuery(sb.from('consistency_log').select('log_date, completed').eq('item_name', '7h+ sleep').gte('log_date', thisWeek).lte('log_date', thisWeekDates[6])),
     safeQuery(sb.from('fitness_weight_log').select('*').eq('week_start', thisWeek).limit(1)),
-    safeQuery(sb.from('consistency_log').select('*').eq('log_date', today)),
     safeQuery(sb.from('fitness_photos').select('*').eq('week_start', thisWeek)),
     safeQuery(sb.from('fitness_daily_session').select('*').eq('session_date', today).limit(1)),
     safeQuery(sb.from('fitness_weight_log').select('progressive_overload,cheat_days').eq('week_start', thisWeek).limit(1))
@@ -3406,11 +3408,6 @@ async function renderFitnessTab() {
   // ── Strength: latest per lift ──
   const strengthMap = {};
   strength.forEach(r => { if (!strengthMap[r.lift_name]) strengthMap[r.lift_name] = r; });
-
-  // ── Supplements synced with Daily ──
-  const suppMap = {};
-  supplementsToday.forEach(r => { suppMap[r.item_name] = r.completed; });
-  const supplementItemsToday = isZincDay(today) ? SUPPLEMENT_ITEMS : SUPPLEMENT_ITEMS.filter(i => i !== 'Zinc');
 
   // ── Weight & goal ──
   const weightGoalPct = currentWeight ? Math.min(100, (currentWeight / WEIGHT_GOAL_LBS) * 100) : 0;
@@ -3487,21 +3484,6 @@ async function renderFitnessTab() {
     <div class="card">
       <p class="card-title">Cardio — this week</p>
       ${renderCardioGrid(cardioMap, thisWeekDates)}
-    </div>
-
-    <!-- Supplements (synced with Daily tab) -->
-    <div class="card">
-      <div class="card-header">
-        <p class="card-title" style="margin-bottom:0;">Supplements — today</p>
-        <span class="card-meta">Synced with Daily tab</span>
-      </div>
-      <div id="fitness-supplements-list">
-        ${supplementItemsToday.map((item, idx) => `
-          <div class="check-row">
-            <input type="checkbox" data-idx="${idx}" ${suppMap[item] ? 'checked' : ''} />
-            <label class="check-label">${escapeHtml(item)}</label>
-          </div>`).join('')}
-      </div>
     </div>
 
     <!-- Daily fitness session log -->
@@ -3599,7 +3581,6 @@ async function renderFitnessTab() {
   attachCardioGridHandlers(thisWeek);
   attachStrengthHandlers();
   attachWeightSleepHandlers(thisWeek, thisWeekDates);
-  attachChecklistHandlers('consistency_log', 'fitness-supplements', supplementItemsToday);
   attachPhotoHandlers(thisWeek);
   attachFitnessSessionHandlers(thisWeek, weekData);
   updateFitnessScorePreview();
@@ -3744,6 +3725,33 @@ async function syncWorkoutDoneForDate(dayDate) {
     user_id: user?.id,
     workout_done: anyActivity,
     protein_done: existing?.protein_done || false,
+    nutrition_done: existing?.nutrition_done || false,
+    energy_rating: existing?.energy_rating ?? null,
+  };
+  session.discipline_score = calcFitnessDailyScore(session);
+  await sb.from('fitness_daily_session').upsert(session, { onConflict: 'user_id,session_date' });
+}
+
+// Mirrors syncWorkoutDoneForDate — '160g protein' (checked from Daily tab's
+// Consistency check, now the only place it's checkable) is the single
+// source of truth for "Protein target reached", so it never needs to be
+// separately re-checked in Log today's session.
+async function syncProteinDoneForDate(dayDate) {
+  const { data: proteinRow } = await sb.from('consistency_log').select('completed')
+    .eq('log_date', dayDate).eq('item_name', '160g protein').maybeSingle();
+  const proteinDone = proteinRow?.completed || false;
+
+  const { data: existingArr } = await sb.from('fitness_daily_session').select('*').eq('session_date', dayDate).limit(1);
+  const existing = existingArr?.[0] || null;
+
+  if (!existing && !proteinDone) return;
+
+  const { data: { user } } = await sb.auth.getUser();
+  const session = {
+    session_date: dayDate,
+    user_id: user?.id,
+    workout_done: existing?.workout_done || false,
+    protein_done: proteinDone,
     nutrition_done: existing?.nutrition_done || false,
     energy_rating: existing?.energy_rating ?? null,
   };
