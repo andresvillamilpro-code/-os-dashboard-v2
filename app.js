@@ -323,6 +323,7 @@ function switchTab(tabName) {
   // other tab keeps the default centered, readable max-width.
   const mainEl = document.querySelector('.main');
   if (mainEl) mainEl.classList.toggle('main-wide', tabName === 'calendar');
+  localStorage.setItem('os_active_tab', tabName);
   const renderer = TAB_RENDERERS[tabName];
   if (renderer) renderer();
 }
@@ -1970,6 +1971,10 @@ async function renderTradingTab() {
   const displayWinRate = weeklyOverride?.winRate != null ? Number(weeklyOverride.winRate) : (thisWeekTrades.length ? thisWeekStats.winRate : null);
 
   container.innerHTML = `
+    <div style="border-left:2px solid var(--purple);padding:10px 14px;background:var(--purple-bg);border-radius:0 8px 8px 0;margin-bottom:12px;font-size:12px;color:var(--purple-light);line-height:1.7;font-style:italic;font-weight:500;">
+      "Whatever you do, work heartily, as for the Lord and not for men." — Colossians 3:23
+    </div>
+
     ${renderHeroCard({
       currentBalance, pnlPct,
       profitTargetPct: Number(settings.profit_target_pct),
@@ -2456,11 +2461,6 @@ async function loadAndRenderDisciplineSection() {
   const scoreColor = (s) => s >= 95 ? 'var(--green)' : s >= 80 ? 'var(--amber)' : s > 0 ? 'var(--red)' : 'var(--text4)';
 
   el.innerHTML = `
-    <!-- Motivation verse -->
-    <div style="border-left:2px solid var(--purple);padding:10px 14px;background:var(--purple-bg);border-radius:0 8px 8px 0;margin-bottom:10px;font-size:12px;color:var(--purple-light);line-height:1.7;font-style:italic;font-weight:500;">
-      "Whatever you do, work heartily, as for the Lord and not for men." — Colossians 3:23
-    </div>
-
     <!-- Section divider -->
     <div style="display:flex;align-items:center;gap:10px;margin:4px 0 10px;">
       <div style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.08em;color:var(--text4);">Trading discipline &amp; performance</div>
@@ -2844,6 +2844,77 @@ function attachTagPickerHandlers(fieldId) {
   }
 }
 
+// ---------- Trade recommendations (auto-fill from FTMO CSV) ----------
+// Standalone/manual entries are still the design — this never links a
+// journal row to a trade row, it just offers the trade's own numbers as a
+// one-click starting point so you're not retyping what the CSV already has.
+let journalRecentTradesInfo = { trades: [], label: '' };
+
+async function loadRecentTradesForJournal() {
+  const { data } = await sb.from('trades').select('*').order('open_time', { ascending: false }).limit(30);
+  if (!data || !data.length) return { trades: [], label: '' };
+
+  const localDate = (isoStr) => new Date(isoStr).toLocaleDateString('en-CA'); // YYYY-MM-DD in local tz
+  const today = todayISO();
+  const mostRecentDate = localDate(data[0].open_time);
+  const targetDate = mostRecentDate;
+  const dayTrades = data.filter(t => localDate(t.open_time) === targetDate);
+  const label = targetDate === today ? "today's trades" : `last trading day — ${targetDate}`;
+  return { trades: dayTrades, label };
+}
+
+function renderTradeRecommendations() {
+  const { trades, label } = journalRecentTradesInfo;
+  if (!trades.length) return '';
+  return `
+    <div class="journal-field" style="margin-bottom:16px;">
+      <label>From your FTMO CSV — ${escapeHtml(label)} (click to auto-fill)</label>
+      <div class="tag-picker">
+        ${trades.map(t => {
+          const isBuy = String(t.trade_type || '').toUpperCase().includes('SELL') ? false : true;
+          const pnl = Number(t.profit || 0) + Number(t.swap || 0) + Number(t.commission || 0);
+          return `
+            <span class="tag-chip trade-recommend-chip" data-trade-id="${t.id}" style="cursor:pointer;">
+              ${escapeHtml(t.symbol || '—')} ${isBuy ? 'BUY' : 'SELL'} &middot; ${t.open_price ?? '—'}
+              <span style="color:${pnl >= 0 ? 'var(--green)' : 'var(--red)'};margin-left:4px;">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(0)}</span>
+            </span>`;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function attachTradeRecommendationHandlers() {
+  const form = document.getElementById('journal-entry-form');
+  if (!form) return;
+  document.querySelectorAll('.trade-recommend-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const trade = journalRecentTradesInfo.trades.find(t => String(t.id) === chip.dataset.tradeId);
+      if (!trade) return;
+
+      const isBuy = String(trade.trade_type || '').toUpperCase().includes('SELL') ? false : true;
+      const setVal = (name, val) => {
+        const el = form.querySelector(`[name="${name}"]`);
+        if (el && val != null && val !== '') el.value = val;
+      };
+      const timeOf = (isoStr) => isoStr ? new Date(isoStr).toTimeString().slice(0, 5) : '';
+
+      setVal('entry_date', new Date(trade.open_time).toLocaleDateString('en-CA'));
+      setVal('asset', trade.symbol);
+      setVal('trade_type', isBuy ? 'BUY' : 'SELL');
+      setVal('entry_time', timeOf(trade.open_time));
+      setVal('close_time', timeOf(trade.close_time));
+      setVal('entry_price', trade.open_price);
+      setVal('stop_loss', trade.sl);
+      setVal('take_profit', trade.tp);
+      setVal('close_price', trade.close_price);
+
+      chip.style.borderColor = 'var(--green)';
+      chip.style.color = 'var(--green)';
+    });
+  });
+}
+
 function rerenderJournalForm() {
   const panel = document.getElementById('journal-form-panel');
   if (!panel) return;
@@ -2856,6 +2927,7 @@ function rerenderJournalForm() {
 function renderJournalEntryForm() {
   return `
     <form id="journal-entry-form">
+      ${renderTradeRecommendations()}
       <div class="journal-section-label">Setup</div>
       <div class="journal-grid-3">
         <div class="journal-field"><label>Date</label><input type="date" name="entry_date" value="${todayISO()}" required /></div>
@@ -2919,6 +2991,7 @@ function resetJournalFormSelections() {
 
 function attachJournalFormHandlers() {
   ['jf-timeframe', 'jf-emotion-before', 'jf-setup', 'jf-emotion-after'].forEach(attachTagPickerHandlers);
+  attachTradeRecommendationHandlers();
 
   const form = document.getElementById('journal-entry-form');
   const errorEl = document.getElementById('journal-form-error');
@@ -3145,10 +3218,12 @@ async function loadAndRenderJournalSection(opts = {}) {
   const el = document.getElementById('journal-section');
   if (!el) return;
 
-  const [, { data: entriesRaw }] = await Promise.all([
+  const [, { data: entriesRaw }, tradesInfo] = await Promise.all([
     loadJournalTags(),
-    sb.from('trading_journal').select('*').order('entry_date', { ascending: false })
+    sb.from('trading_journal').select('*').order('entry_date', { ascending: false }),
+    loadRecentTradesForJournal()
   ]);
+  journalRecentTradesInfo = tradesInfo;
   const entries = entriesRaw || [];
   resetJournalFormSelections();
 
@@ -5181,7 +5256,8 @@ async function initApp() {
       showLoginScreen();
       return;
     }
-    switchTab('daily');
+    const savedTab = localStorage.getItem('os_active_tab');
+    switchTab(TAB_RENDERERS[savedTab] ? savedTab : 'daily');
     loadTopbarStatus();
   } catch (err) {
     const el = document.getElementById('tab-content');
