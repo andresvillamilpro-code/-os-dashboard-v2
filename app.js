@@ -369,14 +369,14 @@ async function renderDailyTab() {
   ]);
 
   container.innerHTML = `
-    ${renderHeroCard(snapshot, { showMission: true })}
+    ${renderCalendarCard()}
+    <div class="identity-banner">${MISSION_STATEMENT}</div>
     ${renderTopGoalsCard(goals)}
     <div class="two-col">
       ${renderChecklistCard('Morning routine', 'morning-routine', routine)}
       ${renderEditableChecklistCard('Consistency check', 'consistency', consistency, consistencyItems)}
     </div>
     ${renderTaskListCard(tasks)}
-    ${renderCalendarCard()}
     ${renderTradingSnapshotBox(snapshot)}
   `;
 
@@ -483,13 +483,20 @@ async function loadTradingSnapshot() {
 
 function renderTradingSnapshotBox(s) {
   if (!s) return '';
-  const pnlClass = s.pnlPct >= 0 ? 'g' : 'r';
+  const progressPct = Math.max(0, Math.min(100, (s.pnlPct / s.profitTargetPct) * 100));
+  const balColor = s.pnlPct >= 0 ? 'var(--green)' : 'var(--red)';
   return `
     <div class="card" style="border-left: 2px solid ${s.weekStatusColor};">
       <div class="card-header">
         <p class="card-title" style="margin-bottom:0;">Trading — this week</p>
         <span style="font-size:11px; font-weight:500; color:${s.weekStatusColor};">${s.weekStatus}</span>
       </div>
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px;">
+        <span style="font-size:var(--fs-lg);font-weight:700;color:${balColor};">$${Math.round(s.currentBalance).toLocaleString()}</span>
+        <span style="font-size:11px;color:var(--text4);">${s.pnlPct >= 0 ? '+' : ''}${s.pnlPct.toFixed(1)}% &middot; target ${s.profitTargetPct}%</span>
+      </div>
+      <div class="hero-progress-track" style="margin-top:0;"><div class="hero-progress-fill" style="width:${progressPct}%;background:${balColor};"></div></div>
+      <div class="hero-progress-caption" style="margin-bottom:10px;"><span>Progress to profit target</span><span>${progressPct.toFixed(0)}%</span></div>
       <div style="background:var(--bg3); border-radius:6px; padding:8px 12px; margin-bottom:12px; font-size:12px; color:${s.weekStatusColor}; font-weight:500;">${s.weekAlert}</div>
       <div class="stat-grid-4">
         <div class="stat-box">
@@ -1910,13 +1917,17 @@ async function renderTradingTab() {
 
   // By day of week + time of day — converted from FTMO's MT5 server time to local time
   const dowNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const byDow = [0, 0, 0, 0, 0, 0, 0];
+  const byDowWins = [0, 0, 0, 0, 0, 0, 0];
+  const byDowLosses = [0, 0, 0, 0, 0, 0, 0];
   const byHour = new Array(24).fill(0);
   trades.forEach(t => {
     const { hour, weekday } = serverTimeToLocalParts(new Date(t.open_time));
     byHour[hour]++;
     const dowIdx = dowNames.indexOf(weekday);
-    if (dowIdx >= 0) byDow[dowIdx]++;
+    if (dowIdx >= 0) {
+      if (netResult(t) > 0) byDowWins[dowIdx]++;
+      else byDowLosses[dowIdx]++;
+    }
   });
 
   // Balance over time
@@ -1946,6 +1957,8 @@ async function renderTradingTab() {
       profitTargetPct: Number(settings.profit_target_pct),
       weekStatus, weekStatusColor
     })}
+
+    <div id="journal-section"><p class="loading-text">Loading trading journal...</p></div>
 
     <div class="card" style="border-left: 2px solid ${weekStatusColor};">
       <div class="card-header">
@@ -2027,7 +2040,7 @@ async function renderTradingTab() {
         <div class="chart-wrap-sm"><canvas id="instrument-chart"></canvas></div>
       </div>
       <div class="card">
-        <p class="card-title">By day of week</p>
+        <p class="card-title">Wins &amp; losses by day of week</p>
         <div class="chart-wrap-sm"><canvas id="dow-chart"></canvas></div>
       </div>
     </div>
@@ -2051,14 +2064,12 @@ async function renderTradingTab() {
     </div>
 
     <div id="discipline-section"><p class="loading-text">Loading discipline stats...</p></div>
-
-    <div id="journal-section"><p class="loading-text">Loading trading journal...</p></div>
   `;
 
   attachTradingSettingsHandler();
   attachTradingSettingsToggle();
   attachCsvUploadHandler();
-  drawTradingCharts({ balancePoints, byInstrument, byDow, dowNames, byHour });
+  drawTradingCharts({ balancePoints, byInstrument, byDowWins, byDowLosses, dowNames, byHour });
 
   // Load discipline section async (doesn't block the main render)
   loadAndRenderDisciplineSection();
@@ -2131,10 +2142,13 @@ function getThemeChartColors() {
   };
 }
 
-function drawTradingCharts({ balancePoints, byInstrument, byDow, dowNames, byHour }) {
+function drawTradingCharts({ balancePoints, byInstrument, byDowWins, byDowLosses, dowNames, byHour }) {
   if (typeof Chart === 'undefined') return;
 
   const { textColor, gridColor, accent, accentSoftRgba, palette } = getThemeChartColors();
+  const cs = getComputedStyle(document.body);
+  const greenColor = cs.getPropertyValue('--green').trim() || '#1D9E75';
+  const redColor = cs.getPropertyValue('--red').trim() || '#E24B4A';
 
   Object.values(TRADING_CHARTS).forEach(c => c?.destroy());
 
@@ -2166,8 +2180,21 @@ function drawTradingCharts({ balancePoints, byInstrument, byDow, dowNames, byHou
   if (dowEl) {
     TRADING_CHARTS.dow = new Chart(dowEl, {
       type: 'bar',
-      data: { labels: dowNames, datasets: [{ data: byDow, backgroundColor: accent, borderRadius: 4 }] },
-      options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: textColor, font: { size: 10 } }, grid: { display: false } }, y: { ticks: { color: textColor, font: { size: 10 } }, grid: { color: gridColor } } }, responsive: true, maintainAspectRatio: false }
+      data: {
+        labels: dowNames,
+        datasets: [
+          { label: 'Wins', data: byDowWins, backgroundColor: greenColor, borderRadius: 4 },
+          { label: 'Losses', data: byDowLosses, backgroundColor: redColor, borderRadius: 4 }
+        ]
+      },
+      options: {
+        plugins: { legend: { position: 'bottom', labels: { color: textColor, font: { size: 10 }, boxWidth: 10 } } },
+        scales: {
+          x: { ticks: { color: textColor, font: { size: 10 } }, grid: { display: false } },
+          y: { ticks: { color: textColor, font: { size: 10 }, precision: 0 }, grid: { color: gridColor } }
+        },
+        responsive: true, maintainAspectRatio: false
+      }
     });
   }
 
@@ -2818,7 +2845,7 @@ function attachJournalFormHandlers() {
       resetJournalFormSelections();
       const panel = document.getElementById('journal-form-panel');
       if (panel) panel.style.display = 'none';
-      loadAndRenderJournalSection();
+      loadAndRenderJournalSection({ justSaved: true });
     });
   }
 }
@@ -2985,7 +3012,7 @@ function computeJournalOverallStats(entries) {
 
 // ---------- Section orchestrator ----------
 
-async function loadAndRenderJournalSection() {
+async function loadAndRenderJournalSection(opts = {}) {
   const el = document.getElementById('journal-section');
   if (!el) return;
 
@@ -3000,6 +3027,14 @@ async function loadAndRenderJournalSection() {
   const overall = computeJournalOverallStats(entries);
 
   el.innerHTML = `
+    ${opts.justSaved ? `
+      <div class="card" style="border-left:2px solid var(--green);margin-bottom:10px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+          <span style="font-size:12px;color:var(--green);font-weight:600;">✅ Journal entry saved.</span>
+          <button type="button" class="btn-secondary" id="journal-proceed-discipline-btn">Proceed with discipline session →</button>
+        </div>
+      </div>
+    ` : ''}
     <div class="card">
       <div class="card-header">
         <p class="card-title" style="margin-bottom:0;">Trading journal</p>
@@ -3023,6 +3058,13 @@ async function loadAndRenderJournalSection() {
       </div>
     </div>
   `;
+
+  const proceedBtn = document.getElementById('journal-proceed-discipline-btn');
+  if (proceedBtn) {
+    proceedBtn.addEventListener('click', () => {
+      document.getElementById('discipline-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
 
   const toggleBtn = document.getElementById('journal-new-toggle');
   const panel = document.getElementById('journal-form-panel');
@@ -3049,6 +3091,98 @@ const STRENGTH_LIFTS = [
   { name: 'Pull-ups', unit: 'reps' }
 ];
 const DOW_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+// Real weekly split — dowIndex matches getWeekDates()'s Mon-first ordering
+// (0=Mon...6=Sun). Marking a day complete checks off every muscle listed
+// here for that day's date in fitness_muscle_log; no new table needed —
+// this just writes to the same per-muscle rows the old grid did, in bulk.
+const WORKOUT_SCHEDULE = [
+  { dowIndex: 0, day: 'Monday',    type: 'Push',    muscles: ['Chest', 'Triceps'] },
+  { dowIndex: 1, day: 'Tuesday',   type: 'Pull',     muscles: ['Back', 'Biceps'] },
+  { dowIndex: 3, day: 'Thursday',  type: 'Push',    muscles: ['Chest', 'Shoulders'] },
+  { dowIndex: 4, day: 'Friday',    type: 'Leg Day', muscles: ['Quads', 'Hamstrings', 'Glutes', 'Calves'] },
+];
+
+function renderWorkoutScheduleCard(muscleMap, thisWeekDates, todayStr) {
+  const dayCards = WORKOUT_SCHEDULE.map(w => {
+    const dayDate = thisWeekDates[w.dowIndex];
+    const isComplete = w.muscles.every(m => muscleMap[`${m}-${dayDate}`]);
+    const isToday = dayDate === todayStr;
+    const isPast = dayDate < todayStr;
+    const badge = isComplete
+      ? '<span style="font-size:11px;font-weight:600;color:var(--green);">✅ Complete</span>'
+      : isToday
+        ? '<span style="font-size:11px;font-weight:600;color:var(--purple-light);">🔵 Today</span>'
+        : isPast
+          ? '<span style="font-size:11px;color:var(--text4);">Missed</span>'
+          : '<span style="font-size:11px;color:var(--text4);">Upcoming</span>';
+
+    return `
+      <div class="card" style="margin-bottom:8px;${isComplete ? 'border-left:2px solid var(--green);' : isToday ? 'border-left:2px solid var(--purple);' : ''}" data-workout-day="${w.dowIndex}">
+        <div class="card-header" style="margin-bottom:6px;">
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--text);">${w.day}</div>
+            <div style="font-size:11px;color:var(--text4);">${dayDate}</div>
+          </div>
+          ${badge}
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--purple-light);margin-bottom:4px;">${w.type}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">
+          ${w.muscles.map(m => `<span class="tag-chip" style="cursor:default;">${escapeHtml(m)}</span>`).join('')}
+        </div>
+        <button type="button" class="btn-secondary workout-complete-toggle" data-dow="${w.dowIndex}" data-date="${dayDate}"
+          style="${isComplete ? 'background:var(--bg3);color:var(--text3);' : ''}">
+          ${isComplete ? '↺ Undo' : '✓ Mark complete'}
+        </button>
+      </div>`;
+  }).join('');
+
+  const completedCount = WORKOUT_SCHEDULE.filter(w => {
+    const dayDate = thisWeekDates[w.dowIndex];
+    return w.muscles.every(m => muscleMap[`${m}-${dayDate}`]);
+  }).length;
+  const weeklyPct = Math.round((completedCount / WORKOUT_SCHEDULE.length) * 100);
+
+  return `
+    <div class="card">
+      <p class="card-title">Weekly training</p>
+      ${dayCards}
+      <div style="margin-top:4px;">
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text3);margin-bottom:4px;">
+          <span>Weekly completion</span>
+          <span style="font-weight:600;color:${weeklyPct === 100 ? 'var(--green)' : 'var(--text2)'};">${completedCount} / ${WORKOUT_SCHEDULE.length} &middot; ${weeklyPct}%</span>
+        </div>
+        <div class="progress-track"><div class="progress-fill" style="width:${weeklyPct}%;background:${weeklyPct === 100 ? 'var(--green)' : 'var(--purple)'};"></div></div>
+      </div>
+    </div>`;
+}
+
+async function toggleWorkoutDay(weekStart, dayDate, muscles, markComplete) {
+  const userId = (await sb.auth.getUser()).data.user?.id;
+  await Promise.all(muscles.map(async (muscle) => {
+    const { data: existing } = await sb.from('fitness_muscle_log').select('id')
+      .eq('week_start', weekStart).eq('muscle_group', muscle).eq('day_date', dayDate).maybeSingle();
+    if (existing) {
+      await sb.from('fitness_muscle_log').update({ trained: markComplete }).eq('id', existing.id);
+    } else {
+      await sb.from('fitness_muscle_log').insert({ week_start: weekStart, muscle_group: muscle, day_date: dayDate, trained: markComplete, user_id: userId });
+    }
+  }));
+}
+
+function attachWorkoutScheduleHandlers(weekStart) {
+  document.querySelectorAll('.workout-complete-toggle').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      const dow = Number(btn.dataset.dow);
+      const dayDate = btn.dataset.date;
+      const schedule = WORKOUT_SCHEDULE.find(w => w.dowIndex === dow);
+      const isCurrentlyComplete = btn.textContent.trim().startsWith('↺');
+      await toggleWorkoutDay(weekStart, dayDate, schedule.muscles, !isCurrentlyComplete);
+      renderFitnessTab();
+    });
+  });
+}
 const WEIGHT_GOAL_LBS = 200;
 // Supplement items synced with Daily tab's consistency_log (same table, same data)
 const SUPPLEMENT_ITEMS = ['160g protein', 'Creatine', 'Zinc', 'Magnesium'];
@@ -3169,14 +3303,15 @@ async function renderFitnessTab() {
 
   // ── Week status message ──
   let weekStatus, weekStatusColor;
-  if (thisTrainingDays.size >= 5) {
-    weekStatus = '✅ Training goal hit — 5 days done';
+  const scheduledDays = WORKOUT_SCHEDULE.length;
+  if (thisTrainingDays.size >= scheduledDays) {
+    weekStatus = `✅ Training goal hit — ${scheduledDays} days done`;
     weekStatusColor = 'var(--green)';
-  } else if (thisTrainingDays.size >= 3) {
-    weekStatus = `💪 ${thisTrainingDays.size} of 5 days done — keep going`;
+  } else if (thisTrainingDays.size >= Math.ceil(scheduledDays / 2)) {
+    weekStatus = `💪 ${thisTrainingDays.size} of ${scheduledDays} days done — keep going`;
     weekStatusColor = 'var(--amber)';
   } else if (thisTrainingDays.size > 0) {
-    weekStatus = `${thisTrainingDays.size} of 5 training days logged so far`;
+    weekStatus = `${thisTrainingDays.size} of ${scheduledDays} training days logged so far`;
     weekStatusColor = 'var(--text3)';
   } else {
     weekStatus = 'No training logged yet this week';
@@ -3210,17 +3345,13 @@ async function renderFitnessTab() {
         Live — updates as you check boxes below. Final snapshot locks in Sunday night.
       </div>
       <div class="stat-grid-3">
-        <div class="stat-box"><div class="stat-box-value" style="color:${weekStatusColor};">${thisTrainingDays.size} / 5</div><div class="stat-box-label">Days trained</div></div>
+        <div class="stat-box"><div class="stat-box-value" style="color:${weekStatusColor};">${thisTrainingDays.size} / ${WORKOUT_SCHEDULE.length}</div><div class="stat-box-label">Days trained</div></div>
         <div class="stat-box"><div class="stat-box-value">${thisCardioDays.size}</div><div class="stat-box-label">Cardio sessions</div></div>
         <div class="stat-box"><div class="stat-box-value ${thisSleep7Count >= 5 ? 'g' : 'a'}">${thisSleep7Count} / 7</div><div class="stat-box-label">7h+ sleep days</div></div>
       </div>
     </div>
 
-    <!-- Muscle group grid -->
-    <div class="card">
-      <p class="card-title">Muscle groups trained — this week</p>
-      ${renderMuscleGrid(muscleMap, thisWeekDates)}
-    </div>
+    ${renderWorkoutScheduleCard(muscleMap, thisWeekDates, today)}
 
     <!-- Cardio grid -->
     <div class="card">
@@ -3334,7 +3465,7 @@ async function renderFitnessTab() {
     <div id="fitness-discipline-section"><p class="loading-text">Loading fitness discipline...</p></div>
   `;
 
-  attachMuscleGridHandlers(thisWeek);
+  attachWorkoutScheduleHandlers(thisWeek);
   attachCardioGridHandlers(thisWeek);
   attachStrengthHandlers();
   attachWeightSleepHandlers(thisWeek, thisWeekDates);
@@ -3348,26 +3479,6 @@ async function renderFitnessTab() {
 }
 
 // ── Grid renderers ──
-
-function renderMuscleGrid(muscleMap, dates) {
-  let html = `<div style="display:grid; grid-template-columns:110px repeat(7,1fr); gap:4px; align-items:center;">`;
-  html += `<div></div>`;
-  DOW_LABELS.forEach(d => {
-    html += `<div style="text-align:center; font-size:10px; color:var(--text4); font-weight:500; padding-bottom:4px;">${d}</div>`;
-  });
-  MUSCLE_GROUPS.forEach(group => {
-    html += `<div style="font-size:12px; color:var(--text2); padding:3px 0;">${group}</div>`;
-    dates.forEach(dateStr => {
-      const checked = muscleMap[`${group}-${dateStr}`] || false;
-      html += `<div style="text-align:center; padding:3px 0;">
-        <input type="checkbox" data-muscle="${escapeHtml(group)}" data-date="${dateStr}" ${checked ? 'checked' : ''}
-          style="width:16px;height:16px;accent-color:var(--purple);cursor:pointer;" />
-      </div>`;
-    });
-  });
-  html += `</div>`;
-  return html;
-}
 
 function renderCardioGrid(cardioMap, dates) {
   let html = `<div style="display:grid; grid-template-columns:110px repeat(7,1fr); gap:4px; align-items:center;">`;
@@ -3460,23 +3571,6 @@ function renderPhotoSlot(type, photo) {
 }
 
 // ── Handlers ──
-
-function attachMuscleGridHandlers(weekStart) {
-  document.querySelectorAll('input[data-muscle]').forEach(cb => {
-    cb.addEventListener('change', async (e) => {
-      const muscle = e.target.dataset.muscle;
-      const day_date = e.target.dataset.date;
-      const trained = e.target.checked;
-      const { data: existing } = await sb.from('fitness_muscle_log').select('id')
-        .eq('week_start', weekStart).eq('muscle_group', muscle).eq('day_date', day_date).maybeSingle();
-      if (existing) {
-        await sb.from('fitness_muscle_log').update({ trained }).eq('id', existing.id);
-      } else {
-        await sb.from('fitness_muscle_log').insert({ week_start: weekStart, muscle_group: muscle, day_date, trained, user_id: (await sb.auth.getUser()).data.user?.id });
-      }
-    });
-  });
-}
 
 function attachCardioGridHandlers(weekStart) {
   document.querySelectorAll('input[data-cardio]').forEach(cb => {
