@@ -11,15 +11,15 @@
 
     /* ── DARK THEME (default) ── */
     :root {
-      --bg: #0a0a0a;
-      --bg2: #141414;
-      --bg3: #1a1a1a;
-      --border: #2a2a2a;
-      --border2: #1e1e1e;
-      --text: #ffffff;
-      --text2: #cccccc;
-      --text3: #888888;
-      --text4: #444444;
+      --bg: #09090B;
+      --bg2: #111827;
+      --bg3: #1F2937;
+      --border: #374151;
+      --border2: #1F2937;
+      --text: #F9FAFB;
+      --text2: #D1D5DB;
+      --text3: #9CA3AF;
+      --text4: #4B5563;
       --green: #1D9E75;
       --green-bg: #0a2018;
       --green-border: #0f3a28;
@@ -29,13 +29,14 @@
       --red: #E24B4A;
       --red-bg: #2a0a0a;
       --red-border: #4a1010;
-      --purple: #534AB7;
-      --purple-light: #7F77DD;
-      --purple-bg: #12102a;
-      --purple-border: #2a2850;
+      --purple: #00D4FF;
+      --purple-light: #33DDFF;
+      --purple-bg: #062730;
+      --purple-border: #0B4A5C;
+      --purple-ink: #04171D;
       --blue: #378ADD;
       --blue-bg: #0c1a2e;
-      --topbar-bg: #0f0f0f;
+      --topbar-bg: #09090B;
       --radius: 10px;
       --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 
@@ -56,17 +57,17 @@
       --dur-fast: 150ms; --dur-base: 250ms; --dur-slow: 500ms;
     }
 
-    /* ── WARM CREAM THEME ── */
+    /* ── LIGHT MODE ── */
     body.theme-cream {
-      --bg: #F5F1EB;
-      --bg2: #FDFAF5;
-      --bg3: #EDEAE3;
-      --border: #D0CCC4;
-      --border2: #D8D4CC;
-      --text: #1A1814;
-      --text2: #2D2A26;
-      --text3: #666058;
-      --text4: #9E9890;
+      --bg: #FFFFFF;
+      --bg2: #F8FAFC;
+      --bg3: #F1F5F9;
+      --border: #E2E8F0;
+      --border2: #EDF1F5;
+      --text: #0F172A;
+      --text2: #334155;
+      --text3: #64748B;
+      --text4: #8B98A9;
       --green: #0F7A58;
       --green-bg: #E4F3EC;
       --green-border: #A8D8C4;
@@ -76,13 +77,14 @@
       --red: #C0312F;
       --red-bg: #FAEAEA;
       --red-border: #EBB4B4;
-      --purple: #534AB7;
-      --purple-light: #6B62CC;
-      --purple-bg: #EEEDFE;
-      --purple-border: #C4C0F0;
+      --purple: #0099CC;
+      --purple-light: #007399;
+      --purple-bg: #E6F6FC;
+      --purple-border: #A8DEEF;
+      --purple-ink: #04171D;
       --blue: #1A68C0;
       --blue-bg: #E4EEF9;
-      --topbar-bg: #EDEAE3;
+      --topbar-bg: #F8FAFC;
       --shadow-sm: 0 1px 2px rgba(30,24,12,.06);
       --shadow-md: 0 4px 16px rgba(30,24,12,.08), 0 1px 2px rgba(30,24,12,.06);
       --shadow-lg: 0 16px 48px rgba(30,24,12,.10), 0 2px 8px rgba(30,24,12,.06);
@@ -100,7 +102,7 @@
     .nav-tabs::-webkit-scrollbar { display: none; }
     .tab-btn { display: flex; align-items: center; gap: 5px; padding: 6px 14px; border-radius: 8px; border: 0.5px solid var(--border2); font-size: 12px; cursor: pointer; white-space: nowrap; background: var(--bg2); color: var(--text4); transition: all .15s; user-select: none; }
     .tab-btn:hover { color: var(--text3); border-color: var(--border); }
-    .tab-btn.active { background: var(--purple); color: #EEEDFE; border-color: var(--purple); }
+    .tab-btn.active { background: var(--purple); color: var(--purple-ink); border-color: var(--purple); }
 
     /* ── THEME TOGGLE BUTTON ── */
     .theme-toggle {
@@ -140,8 +142,7 @@
     @media (max-width: 700px) { .hero-value { font-size: var(--fs-2xl); } }
 
     /* ── IDENTITY BANNER ── */
-    .identity-banner { border-left: 2px solid var(--purple); padding: 10px 14px; background: var(--purple-bg); border-radius: 0 8px 8px 0; margin-bottom: 16px; font-size: 12px; color: #7F77DD; line-height: 1.7; font-style: italic; font-weight: 500; }
-    body.theme-cream .identity-banner { color: #534AB7; }
+    .identity-banner { border-left: 2px solid var(--purple); padding: 10px 14px; background: var(--purple-bg); border-radius: 0 8px 8px 0; margin-bottom: 16px; font-size: 12px; color: var(--purple-light); line-height: 1.7; font-style: italic; font-weight: 500; }
 
     /* ── CHECKLISTS ── */
     .check-row { display: flex; align-items: center; gap: var(--sp-3); padding: 9px 0; border-bottom: 0.5px solid var(--border2); }
@@ -154,7 +155,7 @@
     .goal-num { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; background: var(--purple-bg); font-size: var(--fs-xs); font-weight: 700; color: var(--purple-light); flex-shrink: 0; }
     .goal-slot input[type="text"] { flex: 1; background: transparent; border: none; font-size: var(--fs-base); color: var(--text2); outline: none; font-family: var(--font); }
 
-    .btn-secondary { background: var(--purple); color: #EEEDFE; border: none; border-radius: var(--radius-sm); padding: 9px 16px; font-size: var(--fs-xs); font-weight: 600; cursor: pointer; box-shadow: var(--shadow-sm); transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease); }
+    .btn-secondary { background: var(--purple); color: var(--purple-ink); border: none; border-radius: var(--radius-sm); padding: 9px 16px; font-size: var(--fs-xs); font-weight: 600; cursor: pointer; box-shadow: var(--shadow-sm); transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease); }
     .btn-secondary:hover { transform: translateY(-1px); box-shadow: var(--shadow-md); }
     .btn-secondary:active { transform: translateY(0); }
     .muted-italic { color: var(--text4); font-style: italic; }
@@ -273,7 +274,7 @@
     .settings-field input { width: 100%; }
     .progress-track { height: 8px; background: var(--bg3); border-radius: 4px; overflow: hidden; margin-top: 8px; }
     .progress-fill { height: 100%; background: var(--purple); border-radius: 4px; transition: width .3s; }
-    .file-input-btn { display: inline-block; background: var(--purple); color: #EEEDFE; border-radius: 7px; padding: 7px 14px; font-size: 11px; font-weight: 500; cursor: pointer; }
+    .file-input-btn { display: inline-block; background: var(--purple); color: var(--purple-ink); border-radius: 7px; padding: 7px 14px; font-size: 11px; font-weight: 500; cursor: pointer; }
     .file-input-btn input { display: none; }
     .settings-gear-btn { cursor: pointer; font-size: 15px; opacity: .55; transition: opacity .15s, transform .15s; user-select: none; padding: 2px 4px; }
     .settings-gear-btn:hover { opacity: 1; transform: rotate(20deg); }
