@@ -4895,6 +4895,200 @@ function firstOfMonthISO(d = new Date()) {
   return isoDate(new Date(d.getFullYear(), d.getMonth(), 1));
 }
 
+// ---------- Recent expenses: List/Calendar toggle + pagination ----------
+
+let expenseViewMode = 'list'; // 'list' | 'calendar'
+let expenseRecentAllRows = []; // full fetched set, paginated client-side
+let expenseRecentPage = 0;
+const EXPENSE_PAGE_SIZE = 10;
+let expenseCalendarMonth = firstOfMonthISO(); // first-of-month ISO string currently viewed
+let expenseCalendarRows = [];
+let expenseCalendarSelectedDay = null;
+
+function renderRecentExpensesCardShell() {
+  return `
+    <div class="card">
+      <div class="card-header">
+        <p class="card-title" style="margin-bottom:0;">Recent expenses</p>
+        <div style="display:flex;gap:6px;">
+          <button type="button" class="week-nav-btn expense-view-toggle-btn" data-mode="list"
+            style="${expenseViewMode === 'list' ? 'border-color:var(--purple-border);color:var(--purple-light);' : ''}">📋 List</button>
+          <button type="button" class="week-nav-btn expense-view-toggle-btn" data-mode="calendar"
+            style="${expenseViewMode === 'calendar' ? 'border-color:var(--purple-border);color:var(--purple-light);' : ''}">📅 Calendar</button>
+        </div>
+      </div>
+      <div id="expense-recent-body"></div>
+    </div>
+  `;
+}
+
+async function renderExpenseRecentBody() {
+  const bodyEl = document.getElementById('expense-recent-body');
+  if (!bodyEl) return;
+  if (expenseViewMode === 'calendar') {
+    await loadExpenseCalendarMonth(expenseCalendarMonth);
+    bodyEl.innerHTML = renderExpenseCalendarHTML();
+    attachExpenseCalendarHandlers();
+  } else {
+    bodyEl.innerHTML = renderExpenseListHTML();
+    attachExpenseListHandlers();
+    renderExpenseRecentChart();
+  }
+}
+
+function attachExpenseViewToggleHandlers() {
+  document.querySelectorAll('.expense-view-toggle-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (btn.dataset.mode === expenseViewMode) return;
+      expenseViewMode = btn.dataset.mode;
+      document.querySelectorAll('.expense-view-toggle-btn').forEach(b => {
+        const active = b.dataset.mode === expenseViewMode;
+        b.style.borderColor = active ? 'var(--purple-border)' : '';
+        b.style.color = active ? 'var(--purple-light)' : '';
+      });
+      await renderExpenseRecentBody();
+    });
+  });
+}
+
+// ── List mode ──
+
+function renderExpenseListHTML() {
+  const total = expenseRecentAllRows.length;
+  const totalPages = Math.max(1, Math.ceil(total / EXPENSE_PAGE_SIZE));
+  expenseRecentPage = Math.min(expenseRecentPage, totalPages - 1);
+  const start = expenseRecentPage * EXPENSE_PAGE_SIZE;
+  const pageRows = expenseRecentAllRows.slice(start, start + EXPENSE_PAGE_SIZE);
+
+  return `
+    ${total ? '<div class="chart-wrap-sm"><canvas id="expense-recent-chart"></canvas></div>' : ''}
+    <div id="expense-recent-list" style="margin-top:10px;">
+      ${pageRows.length ? pageRows.map(r => renderExpenseRow(r)).join('') : '<p class="empty-state">No confirmed expenses yet.</p>'}
+    </div>
+    ${total > EXPENSE_PAGE_SIZE ? `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;padding-top:12px;border-top:0.5px solid var(--border2);">
+        <button type="button" class="week-nav-btn" id="expense-page-prev" ${expenseRecentPage === 0 ? 'disabled' : ''} style="${expenseRecentPage === 0 ? 'opacity:.4;cursor:default;' : ''}">← Prev</button>
+        <span class="card-meta">Page ${expenseRecentPage + 1} of ${totalPages} &middot; ${total} total</span>
+        <button type="button" class="week-nav-btn" id="expense-page-next" ${expenseRecentPage >= totalPages - 1 ? 'disabled' : ''} style="${expenseRecentPage >= totalPages - 1 ? 'opacity:.4;cursor:default;' : ''}">Next →</button>
+      </div>
+    ` : ''}
+  `;
+}
+
+function attachExpenseListHandlers() {
+  document.getElementById('expense-page-prev')?.addEventListener('click', () => {
+    expenseRecentPage = Math.max(0, expenseRecentPage - 1);
+    renderExpenseRecentBody();
+  });
+  document.getElementById('expense-page-next')?.addEventListener('click', () => {
+    const totalPages = Math.max(1, Math.ceil(expenseRecentAllRows.length / EXPENSE_PAGE_SIZE));
+    expenseRecentPage = Math.min(totalPages - 1, expenseRecentPage + 1);
+    renderExpenseRecentBody();
+  });
+  attachRecentExpenseHandlers(expenseRecentAllRows);
+}
+
+// ── Calendar mode ──
+
+async function loadExpenseCalendarMonth(monthISO) {
+  const d = new Date(monthISO + 'T12:00:00');
+  const start = monthISO;
+  const end = isoDate(new Date(d.getFullYear(), d.getMonth() + 1, 1));
+  expenseCalendarRows = await safeQuery(
+    sb.from('expense_log').select('*').eq('status', 'confirmed')
+      .gte('expense_date', start).lt('expense_date', end)
+      .order('expense_date', { ascending: true })
+  );
+}
+
+function renderExpenseCalendarHTML() {
+  const monthDate = new Date(expenseCalendarMonth + 'T12:00:00');
+  const monthLabel = monthDate.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  const year = monthDate.getFullYear(), month = monthDate.getMonth();
+  const firstOfMonth = new Date(year, month, 1);
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const firstDow = (firstOfMonth.getDay() + 6) % 7; // Mon-first: 0=Mon...6=Sun
+
+  const totalsByDay = {};
+  expenseCalendarRows.forEach(r => {
+    if (!r.expense_date) return;
+    totalsByDay[r.expense_date] = (totalsByDay[r.expense_date] || 0) + Number(r.amount || 0);
+  });
+
+  const todayStr = todayISO();
+  const cells = [];
+  for (let i = 0; i < firstDow; i++) cells.push('<div class="expense-cal-cell empty"></div>');
+  for (let day = 1; day <= daysInMonth; day++) {
+    const dStr = isoDate(new Date(year, month, day));
+    const total = totalsByDay[dStr];
+    const isToday = dStr === todayStr;
+    const isSelected = dStr === expenseCalendarSelectedDay;
+    cells.push(`
+      <div class="expense-cal-cell ${total ? 'has-data' : ''} ${isToday ? 'is-today' : ''} ${isSelected ? 'is-selected' : ''}" data-date="${dStr}">
+        <span class="expense-cal-daynum">${day}</span>
+        ${total ? `<span class="expense-cal-amount">$${total.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>` : ''}
+      </div>
+    `);
+  }
+
+  const monthTotal = Object.values(totalsByDay).reduce((a, b) => a + b, 0);
+
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+      <button type="button" class="week-nav-btn" id="expense-cal-prev">← Prev</button>
+      <div style="text-align:center;">
+        <div style="font-size:13px;font-weight:600;color:var(--text2);">${monthLabel}</div>
+        <div class="card-meta">$${monthTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })} total</div>
+      </div>
+      <button type="button" class="week-nav-btn" id="expense-cal-next">Next →</button>
+    </div>
+    <div class="expense-cal-grid">
+      ${['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(d => `<div class="expense-cal-dow">${d}</div>`).join('')}
+      ${cells.join('')}
+    </div>
+    <div id="expense-cal-day-detail" style="margin-top:14px;">
+      ${expenseCalendarSelectedDay ? renderExpenseCalendarDayDetail() : '<p class="empty-state">Click a day to see its transactions.</p>'}
+    </div>
+  `;
+}
+
+function renderExpenseCalendarDayDetail() {
+  const dayRows = expenseCalendarRows.filter(r => r.expense_date === expenseCalendarSelectedDay);
+  if (!dayRows.length) return '<p class="empty-state">No transactions that day.</p>';
+  const dayLabel = new Date(expenseCalendarSelectedDay + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+  return `
+    <div style="border-top:0.5px solid var(--border2);padding-top:12px;">
+      <p class="card-title">${dayLabel}</p>
+      ${dayRows.map(r => renderExpenseRow(r)).join('')}
+    </div>
+  `;
+}
+
+function attachExpenseCalendarHandlers() {
+  document.getElementById('expense-cal-prev')?.addEventListener('click', async () => {
+    const d = new Date(expenseCalendarMonth + 'T12:00:00');
+    expenseCalendarMonth = isoDate(new Date(d.getFullYear(), d.getMonth() - 1, 1));
+    expenseCalendarSelectedDay = null;
+    await renderExpenseRecentBody();
+  });
+  document.getElementById('expense-cal-next')?.addEventListener('click', async () => {
+    const d = new Date(expenseCalendarMonth + 'T12:00:00');
+    expenseCalendarMonth = isoDate(new Date(d.getFullYear(), d.getMonth() + 1, 1));
+    expenseCalendarSelectedDay = null;
+    await renderExpenseRecentBody();
+  });
+  document.querySelectorAll('.expense-cal-cell[data-date]').forEach(cell => {
+    cell.addEventListener('click', () => {
+      expenseCalendarSelectedDay = cell.dataset.date;
+      const detailEl = document.getElementById('expense-cal-day-detail');
+      if (detailEl) detailEl.innerHTML = renderExpenseCalendarDayDetail();
+      document.querySelectorAll('.expense-cal-cell').forEach(c => c.classList.toggle('is-selected', c.dataset.date === expenseCalendarSelectedDay));
+      attachRecentExpenseHandlers(expenseCalendarRows);
+    });
+  });
+  attachRecentExpenseHandlers(expenseCalendarRows);
+}
+
 async function renderExpensesTab() {
   const container = document.getElementById('tab-content');
   container.innerHTML = `<p class="loading-text">Loading expenses...</p>`;
@@ -4908,8 +5102,13 @@ async function renderExpensesTab() {
   const [allCategoryRows, reviewRows, recentRows] = await Promise.all([
     safeQuery(sb.from('expense_by_category_monthly').select('*').gte('month', twelveMonthsAgo).order('month', { ascending: true })),
     safeQuery(sb.from('expense_log').select('*').eq('status', 'needs_review').order('created_at', { ascending: false })),
-    safeQuery(sb.from('expense_log').select('*').eq('status', 'confirmed').order('expense_date', { ascending: false }).limit(20)),
+    // Fetched once here, then paginated 10-per-page client-side — 300 is a
+    // generous ceiling for a personal expense log without an unbounded query.
+    safeQuery(sb.from('expense_log').select('*').eq('status', 'confirmed').order('expense_date', { ascending: false }).limit(300)),
   ]);
+
+  expenseRecentAllRows = recentRows;
+  expenseRecentPage = 0;
 
   const categoryRows = allCategoryRows.filter(r => r.month === thisMonth);
   const monthTotal = categoryRows.reduce((s, r) => s + Number(r.total_amount || 0), 0);
@@ -4950,13 +5149,7 @@ async function renderExpensesTab() {
       </div>
     </div>
 
-    <div class="card">
-      <p class="card-title">Recent expenses</p>
-      ${recentRows.length ? '<div class="chart-wrap-sm"><canvas id="expense-recent-chart"></canvas></div>' : ''}
-      <div id="expense-recent-list" style="margin-top:10px;">
-        ${recentRows.length ? recentRows.map(r => renderExpenseRow(r)).join('') : '<p class="empty-state">No confirmed expenses yet.</p>'}
-      </div>
-    </div>
+    ${renderRecentExpensesCardShell()}
   `;
 
   if (reviewCount) {
@@ -4970,9 +5163,10 @@ async function renderExpensesTab() {
     attachReviewRowHandlers(reviewRows);
   }
 
-  renderExpenseCharts(categoryRows, allCategoryRows, recentRows);
+  renderExpenseCharts(categoryRows, allCategoryRows);
   attachExpenseAddHandlers();
-  attachRecentExpenseHandlers(recentRows);
+  attachExpenseViewToggleHandlers();
+  await renderExpenseRecentBody();
 }
 
 // Edit button on any already-logged (confirmed) expense — reuses the same
@@ -5075,7 +5269,7 @@ function attachReviewRowHandlers(reviewRows) {
   document.querySelectorAll('.expense-keep-both-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
       btn.disabled = true;
-      const { error } = await sb.from('expense_log').update({ status: 'confirmed', duplicate_of: null }).eq('id', btn.dataset.id);
+      const { error } = await sb.from('expense_log').update({ status: 'confirmed' }).eq('id', btn.dataset.id);
       if (error) { alert('Could not update — try again.'); btn.disabled = false; return; }
       renderExpensesTab();
     });
@@ -5209,8 +5403,9 @@ const CATEGORY_COLORS = {
   'Trading Expenses': '#F6BF26',
 };
 
-function renderExpenseCharts(categoryRows, allCategoryRows, recentRows) {
-  Object.values(EXPENSE_CHARTS).forEach(c => c?.destroy());
+function renderExpenseCharts(categoryRows, allCategoryRows) {
+  if (EXPENSE_CHARTS.category) EXPENSE_CHARTS.category.destroy();
+  if (EXPENSE_CHARTS.trend) EXPENSE_CHARTS.trend.destroy();
 
   const { textColor, gridColor } = getThemeChartColors();
 
@@ -5271,41 +5466,47 @@ function renderExpenseCharts(categoryRows, allCategoryRows, recentRows) {
       }
     });
   }
+}
 
-  // One bar per category (summed across the recent transactions), not one
-  // bar per individual transaction.
+// Recent-expenses category chart — its own function since it needs to
+// redraw independently when paging or switching List/Calendar view,
+// unlike the two charts above which only redraw on a full tab reload.
+function renderExpenseRecentChart() {
+  if (EXPENSE_CHARTS.recent) { EXPENSE_CHARTS.recent.destroy(); EXPENSE_CHARTS.recent = null; }
   const recentEl = document.getElementById('expense-recent-chart');
-  if (recentEl && recentRows && recentRows.length) {
-    const totalsByCategory = {};
-    recentRows.forEach(r => {
-      const cat = r.category || 'Uncategorized';
-      totalsByCategory[cat] = (totalsByCategory[cat] || 0) + Number(r.amount || 0);
-    });
-    const categories = Object.keys(totalsByCategory).sort((a, b) => totalsByCategory[b] - totalsByCategory[a]);
+  if (!recentEl) return;
 
-    EXPENSE_CHARTS.recent = new Chart(recentEl, {
-      type: 'bar',
-      data: {
-        labels: categories,
-        datasets: [{
-          data: categories.map(c => totalsByCategory[c]),
-          backgroundColor: categories.map(c => CATEGORY_COLORS[c] || '#888888'),
-          borderRadius: 4,
-        }]
+  const { textColor, gridColor } = getThemeChartColors();
+  const totalsByCategory = {};
+  expenseRecentAllRows.forEach(r => {
+    const cat = r.category || 'Uncategorized';
+    totalsByCategory[cat] = (totalsByCategory[cat] || 0) + Number(r.amount || 0);
+  });
+  const categories = Object.keys(totalsByCategory).sort((a, b) => totalsByCategory[b] - totalsByCategory[a]);
+  if (!categories.length) return;
+
+  EXPENSE_CHARTS.recent = new Chart(recentEl, {
+    type: 'bar',
+    data: {
+      labels: categories,
+      datasets: [{
+        data: categories.map(c => totalsByCategory[c]),
+        backgroundColor: categories.map(c => CATEGORY_COLORS[c] || '#888888'),
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => `$${ctx.parsed.y.toLocaleString(undefined, { maximumFractionDigits: 2 })}` } }
       },
-      options: {
-        plugins: {
-          legend: { display: false },
-          tooltip: { callbacks: { label: ctx => `$${ctx.parsed.y.toLocaleString(undefined, { maximumFractionDigits: 2 })}` } }
-        },
-        scales: {
-          x: { ticks: { color: textColor, font: { size: 10 } }, grid: { display: false } },
-          y: { ticks: { color: textColor, font: { size: 10 }, callback: v => '$' + v }, grid: { color: gridColor } }
-        },
-        responsive: true, maintainAspectRatio: false
-      }
-    });
-  }
+      scales: {
+        x: { ticks: { color: textColor, font: { size: 10 } }, grid: { display: false } },
+        y: { ticks: { color: textColor, font: { size: 10 }, callback: v => '$' + v }, grid: { color: gridColor } }
+      },
+      responsive: true, maintainAspectRatio: false
+    }
+  });
 }
 
 // ---------- Topbar status strip ----------
